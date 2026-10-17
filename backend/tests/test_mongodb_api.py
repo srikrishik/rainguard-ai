@@ -1,3 +1,4 @@
+
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -7,6 +8,9 @@ import pytest
 
 from app import main
 from app.database import MongoConnection
+from app.gemma_service import GemmaServiceError
+from app.schemas import GemmaReport
+from app.risk_service import assess_asset_risk
 
 
 class FakeCursor:
@@ -26,7 +30,8 @@ class FakeCollection:
         self.documents = []
 
     def insert_one(self, document):
-        stored = {**document, "_id": ObjectId()}
+        stored = dict(document)
+        stored.setdefault("_id", ObjectId())
         self.documents.append(stored)
         return SimpleNamespace(inserted_id=stored["_id"])
 
@@ -49,6 +54,21 @@ class FakeCollection:
             ]
         )
 
+    def update_one(self, query, updates):
+        document = self.find_one(query)
+        if document is None:
+            return SimpleNamespace(matched_count=0, modified_count=0)
+
+        document.update(updates.get("$set", {}))
+        return SimpleNamespace(matched_count=1, modified_count=1)
+
+
+class FailingCollection(FakeCollection):
+    def insert_one(self, document):
+        from pymongo.errors import PyMongoError
+
+        raise PyMongoError("database unavailable")
+
 
 class FakeDatabase:
     def __init__(self):
@@ -56,6 +76,8 @@ class FakeDatabase:
             "societies": FakeCollection(),
             "assets": FakeCollection(),
             "incidents": FakeCollection(),
+            "inspections": FakeCollection(),
+            "risk_assessments": FakeCollection(),
         }
 
     def __getitem__(self, name):
@@ -138,7 +160,11 @@ def test_asset_can_be_created_and_retrieved(monkeypatch):
 
 
 def test_asset_rejects_invalid_id_and_missing_asset(monkeypatch):
-    monkeypatch.setattr(main, "_connection", lambda request: FakeConnection(FakeDatabase()))
+    monkeypatch.setattr(
+        main,
+        "_connection",
+        lambda request: FakeConnection(FakeDatabase()),
+    )
 
     with TestClient(main.app) as client:
         invalid_response = client.get("/assets/not-an-object-id")
@@ -149,7 +175,11 @@ def test_asset_rejects_invalid_id_and_missing_asset(monkeypatch):
 
 
 def test_asset_validation_rejects_unknown_fields(monkeypatch):
-    monkeypatch.setattr(main, "_connection", lambda request: FakeConnection(FakeDatabase()))
+    monkeypatch.setattr(
+        main,
+        "_connection",
+        lambda request: FakeConnection(FakeDatabase()),
+    )
 
     with TestClient(main.app) as client:
         response = client.post(
@@ -179,7 +209,11 @@ def test_incident_history_is_returned_newest_first(monkeypatch):
             },
         ]
     )
-    monkeypatch.setattr(main, "_connection", lambda request: FakeConnection(database))
+    monkeypatch.setattr(
+        main,
+        "_connection",
+        lambda request: FakeConnection(database),
+    )
 
     with TestClient(main.app) as client:
         response = client.get(f"/assets/{asset_id}/incidents")
@@ -189,3 +223,451 @@ def test_incident_history_is_returned_newest_first(monkeypatch):
         "Recent waterlogging",
         "Earlier waterlogging",
     ]
+
+
+def test_fake_inspection_collection_can_update_and_retrieve_record():
+    database = FakeDatabase()
+    inspection_id = ObjectId()
+
+    database["inspections"].insert_one(
+        {
+            "_id": inspection_id,
+            "status": "pending",
+            "created_at": datetime.now(timezone.utc),
+        }
+    )
+
+    database["inspections"].update_one(
+        {"_id": inspection_id},
+        {"$set": {"status": "completed"}},
+    )
+
+    inspection = database["inspections"].find_one({"_id": inspection_id})
+
+    assert inspection is not None
+    assert inspection["_id"] == inspection_id
+    assert inspection["status"] == "completed"
+
+
+def valid_png() -> bytes:
+    return b"\x89PNG\r\n\x1a\nfake-imageIEND"
+
+
+def make_gemma_report() -> GemmaReport:
+    return GemmaReport(
+        summary="Visible debris near the drain.",
+        observations=[
+            {
+                "description": "Debris is visible near the drain opening.",
+                "concern": "moderate",
+            }
+        ],
+        severity="moderate",
+        confidence="medium",
+        recommended_actions=["Have maintenance staff inspect the drain."],
+        requires_human_review=False,
+    )
+
+
+class FakeGemma:
+    def __init__(self, result=None, error=None):
+        self.result = result
+        self.error = error
+        self.calls = 0
+
+    def analyze_image(self, image_bytes, content_type, asset_context):
+        self.calls += 1
+        if self.error:
+            raise self.error
+        return self.result
+
+
+def asset_database():
+    database = FakeDatabase()
+    asset_id = ObjectId()
+    database["assets"].documents.append(
+        {
+            "_id": asset_id,
+            "society_id": "society-1",
+            "name": "North drain",
+            "location": "Gate A",
+        }
+    )
+    return database, asset_id
+
+
+def test_inspection_upload_saves_completed_report(monkeypatch):
+    database, asset_id = asset_database()
+    gemma = FakeGemma(make_gemma_report())
+    monkeypatch.setattr(main, "_connection", lambda request: FakeConnection(database))
+    monkeypatch.setattr(main, "_gemma_service", lambda request: gemma)
+
+    with TestClient(main.app) as client:
+        response = client.post(
+            f"/assets/{asset_id}/inspections",
+            files={"file": ("drain.png", valid_png(), "image/png")},
+        )
+
+    assert response.status_code == 201
+    assert response.json()["status"] == "completed"
+    assert response.json()["report"]["requires_human_review"] is True
+    assert gemma.calls == 1
+    stored = database["inspections"].documents[0]
+    assert stored["status"] == "completed"
+    assert stored["byte_size"] == len(valid_png())
+    assert stored["content_type"] == "image/png"
+    assert stored["report"]["summary"] == "Visible debris near the drain."
+
+
+@pytest.mark.parametrize(
+    ("filename", "content", "content_type"),
+    [
+        ("empty.png", b"", "image/png"),
+        ("drain.gif", b"GIF89a", "image/gif"),
+        ("fake.png", b"not-a-png", "image/png"),
+    ],
+)
+def test_inspection_rejects_invalid_images(monkeypatch, filename, content, content_type):
+    database, asset_id = asset_database()
+    gemma = FakeGemma(make_gemma_report())
+    monkeypatch.setattr(main, "_connection", lambda request: FakeConnection(database))
+    monkeypatch.setattr(main, "_gemma_service", lambda request: gemma)
+
+    with TestClient(main.app) as client:
+        response = client.post(
+            f"/assets/{asset_id}/inspections",
+            files={"file": (filename, content, content_type)},
+        )
+
+    assert response.status_code == 400
+    assert gemma.calls == 0
+    assert database["inspections"].documents == []
+
+
+def test_inspection_rejects_oversized_images(monkeypatch):
+    database, asset_id = asset_database()
+    gemma = FakeGemma(make_gemma_report())
+    monkeypatch.setattr(main, "_connection", lambda request: FakeConnection(database))
+    monkeypatch.setattr(main, "_gemma_service", lambda request: gemma)
+
+    with TestClient(main.app) as client:
+        response = client.post(
+            f"/assets/{asset_id}/inspections",
+            files={
+                "file": (
+                    "large.png",
+                    b"\x89PNG\r\n\x1a\n" + b"x" * (5 * 1024 * 1024),
+                    "image/png",
+                )
+            },
+        )
+
+    assert response.status_code == 413
+    assert gemma.calls == 0
+    assert database["inspections"].documents == []
+
+
+def test_inspection_rejects_invalid_and_missing_assets(monkeypatch):
+    database = FakeDatabase()
+    gemma = FakeGemma(make_gemma_report())
+    monkeypatch.setattr(main, "_connection", lambda request: FakeConnection(database))
+    monkeypatch.setattr(main, "_gemma_service", lambda request: gemma)
+
+    with TestClient(main.app) as client:
+        invalid = client.post(
+            "/assets/not-an-object-id/inspections",
+            files={"file": ("drain.png", valid_png(), "image/png")},
+        )
+        missing = client.post(
+            f"/assets/{ObjectId()}/inspections",
+            files={"file": ("drain.png", valid_png(), "image/png")},
+        )
+
+    assert invalid.status_code == 400
+    assert missing.status_code == 404
+    assert gemma.calls == 0
+
+
+def test_provider_failure_keeps_failed_inspection_record(monkeypatch):
+    database, asset_id = asset_database()
+    gemma = FakeGemma(
+        error=GemmaServiceError("provider_timeout", "safe timeout message")
+    )
+    monkeypatch.setattr(main, "_connection", lambda request: FakeConnection(database))
+    monkeypatch.setattr(main, "_gemma_service", lambda request: gemma)
+
+    with TestClient(main.app) as client:
+        response = client.post(
+            f"/assets/{asset_id}/inspections",
+            files={"file": ("drain.png", valid_png(), "image/png")},
+        )
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "detail": "image analysis failed",
+    }
+    assert database["inspections"].documents[0]["status"] == "failed"
+    assert database["inspections"].documents[0]["error_code"] == "provider_timeout"
+
+
+def test_provider_quota_failure_returns_rate_limit_and_persists_failure(monkeypatch):
+    database, asset_id = asset_database()
+    gemma = FakeGemma(
+        error=GemmaServiceError("provider_quota_exceeded", "safe quota message")
+    )
+    monkeypatch.setattr(main, "_connection", lambda request: FakeConnection(database))
+    monkeypatch.setattr(main, "_gemma_service", lambda request: gemma)
+
+    with TestClient(main.app) as client:
+        response = client.post(
+            f"/assets/{asset_id}/inspections",
+            files={"file": ("drain.png", valid_png(), "image/png")},
+        )
+
+    assert response.status_code == 429
+    assert database["inspections"].documents[0]["status"] == "failed"
+
+
+def test_database_insert_failure_does_not_call_provider(monkeypatch):
+    database, asset_id = asset_database()
+    database.collections["inspections"] = FailingCollection()
+    gemma = FakeGemma(make_gemma_report())
+    monkeypatch.setattr(main, "_connection", lambda request: FakeConnection(database))
+    monkeypatch.setattr(main, "_gemma_service", lambda request: gemma)
+
+    with TestClient(main.app) as client:
+        response = client.post(
+            f"/assets/{asset_id}/inspections",
+            files={"file": ("drain.png", valid_png(), "image/png")},
+        )
+
+    assert response.status_code == 503
+    assert gemma.calls == 0
+
+
+def test_get_inspection_success_invalid_id_and_missing(monkeypatch):
+    database, asset_id = asset_database()
+    inspection_id = ObjectId()
+    database["inspections"].documents.append(
+        {
+            "_id": inspection_id,
+            "asset_id": asset_id,
+            "status": "completed",
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+            "report": make_gemma_report().model_dump(),
+        }
+    )
+    monkeypatch.setattr(main, "_connection", lambda request: FakeConnection(database))
+
+    with TestClient(main.app) as client:
+        success = client.get(f"/inspections/{inspection_id}")
+        invalid = client.get("/inspections/not-an-object-id")
+        missing = client.get(f"/inspections/{ObjectId()}")
+
+    assert success.status_code == 200
+    assert success.json()["status"] == "completed"
+    assert invalid.status_code == 400
+    assert missing.status_code == 404
+
+
+def test_get_asset_inspections_returns_newest_first(monkeypatch):
+    database, asset_id = asset_database()
+    older_id = ObjectId()
+    newer_id = ObjectId()
+    older_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    newer_time = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    database["inspections"].documents.extend(
+        [
+            {
+                "_id": older_id,
+                "asset_id": asset_id,
+                "status": "completed",
+                "created_at": older_time,
+                "updated_at": older_time,
+                "report": make_gemma_report().model_dump(),
+            },
+            {
+                "_id": newer_id,
+                "asset_id": asset_id,
+                "status": "failed",
+                "created_at": newer_time,
+                "updated_at": newer_time,
+                "error_code": "provider_timeout",
+            },
+        ]
+    )
+    monkeypatch.setattr(main, "_connection", lambda request: FakeConnection(database))
+
+    with TestClient(main.app) as client:
+        response = client.get(f"/assets/{asset_id}/inspections")
+
+    assert response.status_code == 200
+    records = response.json()
+    assert [record["id"] for record in records] == [str(newer_id), str(older_id)]
+    assert records[0]["status"] == "failed"
+    assert records[0]["report"] is None
+    assert records[0]["error_code"] == "provider_timeout"
+    assert records[1]["report"]["summary"] == "Visible debris near the drain."
+
+
+def test_get_asset_inspections_returns_empty_history(monkeypatch):
+    database, asset_id = asset_database()
+    monkeypatch.setattr(main, "_connection", lambda request: FakeConnection(database))
+
+    with TestClient(main.app) as client:
+        response = client.get(f"/assets/{asset_id}/inspections")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_rule_baseline_uses_recent_incidents_and_completed_inspections():
+    assessed_at = datetime(2026, 3, 1, tzinfo=timezone.utc)
+    result = assess_asset_risk(
+        str(ObjectId()),
+        [
+            {
+                "occurred_at": datetime(2026, 2, 20, tzinfo=timezone.utc),
+            },
+            {
+                "occurred_at": datetime(2026, 2, 25, tzinfo=timezone.utc),
+            },
+        ],
+        [
+            {
+                "status": "completed",
+                "created_at": datetime(2026, 2, 28, tzinfo=timezone.utc),
+                "report": {
+                    "severity": "high",
+                    "observations": [{"concern": "high"}],
+                },
+            },
+            {
+                "status": "failed",
+                "created_at": datetime(2026, 2, 28, tzinfo=timezone.utc),
+                "report": {"severity": "high"},
+            },
+        ],
+        assessed_at,
+    )
+
+    assert result["priority"] == "high"
+    assert result["score"] == 10
+    assert result["requires_human_review"] is True
+    assert any("2 incident(s)" in item for item in result["evidence"])
+
+
+def test_rule_baseline_applies_timestamp_cutoff_and_missing_data_warning():
+    result = assess_asset_risk(
+        str(ObjectId()),
+        [{"occurred_at": datetime(2026, 1, 1, tzinfo=timezone.utc)}],
+        [{"status": "pending", "report": {"severity": "high"}}],
+        datetime(2026, 3, 1, tzinfo=timezone.utc),
+    )
+
+    assert result["priority"] == "medium"
+    assert result["score"] == 0
+    assert "No completed inspection evidence is available" in result[
+        "data_quality_warnings"
+    ]
+
+
+@pytest.mark.parametrize(
+    "created_at",
+    [
+        datetime(2026, 2, 28, tzinfo=timezone.utc),
+        datetime(2026, 2, 28),
+    ],
+)
+def test_rule_baseline_normalizes_inspection_timestamps(created_at):
+    result = assess_asset_risk(
+        str(ObjectId()),
+        [],
+        [
+            {
+                "status": "completed",
+                "created_at": created_at,
+                "report": {
+                    "severity": "moderate",
+                    "observations": [],
+                },
+            }
+        ],
+        datetime(2026, 3, 1, tzinfo=timezone.utc),
+    )
+
+    assert result["priority"] == "medium"
+    assert result["score"] == 2
+    assert not any(
+        "No completed inspection is available within" in warning
+        for warning in result["data_quality_warnings"]
+    )
+
+
+def test_rule_baseline_handles_invalid_inspection_timestamp():
+    result = assess_asset_risk(
+        str(ObjectId()),
+        [],
+        [
+            {
+                "status": "completed",
+                "created_at": "not-a-timestamp",
+                "report": {"severity": "high", "observations": []},
+            }
+        ],
+        datetime(2026, 3, 1, tzinfo=timezone.utc),
+    )
+
+    assert result["priority"] == "medium"
+    assert result["score"] == 4
+    assert any(
+        "No completed inspection is available within" in warning
+        for warning in result["data_quality_warnings"]
+    )
+
+
+def test_risk_assessment_is_persisted_and_retrieved(monkeypatch):
+    database, asset_id = asset_database()
+    monkeypatch.setattr(main, "_connection", lambda request: FakeConnection(database))
+
+    with TestClient(main.app) as client:
+        created = client.post(f"/assets/{asset_id}/risk-assessments")
+        latest = client.get(f"/assets/{asset_id}/risk-assessments/latest")
+
+    assert created.status_code == 201
+    assert latest.status_code == 200
+    assert latest.json()["id"] == created.json()["id"]
+    assert latest.json()["requires_human_review"] is True
+
+
+def test_risk_assessment_rejects_invalid_missing_and_database_failure(monkeypatch):
+    database, asset_id = asset_database()
+    monkeypatch.setattr(main, "_connection", lambda request: FakeConnection(database))
+
+    with TestClient(main.app) as client:
+        invalid = client.post("/assets/not-an-object-id/risk-assessments")
+        missing = client.post(
+            f"/assets/{ObjectId()}/risk-assessments"
+        )
+
+    assert invalid.status_code == 400
+    assert missing.status_code == 404
+
+    database.collections["risk_assessments"] = FailingCollection()
+    with TestClient(main.app) as client:
+        failed = client.post(f"/assets/{asset_id}/risk-assessments")
+    assert failed.status_code == 503
+
+
+def test_rule_baseline_remains_default_when_tabpfn_is_unavailable(monkeypatch):
+    database, asset_id = asset_database()
+    monkeypatch.setattr(main, "_connection", lambda request: FakeConnection(database))
+
+    with TestClient(main.app) as client:
+        response = client.post(f"/assets/{asset_id}/risk-assessments")
+
+    assert response.status_code == 201
+    assert response.json()["method"] == "rule_based_asset_risk_baseline"
+    assert response.json()["method_version"] == "phase-5a-v1"
+    assert response.json()["requires_human_review"] is True

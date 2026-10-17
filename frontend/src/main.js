@@ -60,11 +60,11 @@ app.innerHTML = `
           </label>
           <label>
             Location <span class="optional">Optional</span>
-            <input name="location" maxlength="500" placeholder="e.g. Gate A" />
+            <input name="location" maxlength="500" placeholder="e.g., Near Gate 2, Block A" />
           </label>
           <label>
             Description <span class="optional">Optional</span>
-            <textarea name="description" maxlength="2000" rows="3" placeholder="What should the team know?"></textarea>
+            <textarea name="description" maxlength="2000" rows="3" placeholder="e.g., Drain frequently gets blocked by leaves during heavy rain."></textarea>
           </label>
           <button type="submit" class="primary-button">
             <span>Create asset</span><span aria-hidden="true">→</span>
@@ -83,11 +83,18 @@ app.innerHTML = `
         </div>
         <p class="panel-intro">Enter an asset ID to see its record and the incidents already observed there.</p>
         <form id="lookup-form" class="lookup-form">
-          <label for="asset-id">Asset ID</label>
+          <label for="asset-id">Select an asset</label><p class="field-help">Find the asset ID in the asset record after creating an asset.</p>
           <div class="lookup-row">
-            <input id="asset-id" name="asset_id" required placeholder="Paste a MongoDB asset ID" />
+            <input id="asset-id" name="asset_id" required placeholder="Enter the asset ID" />
             <button type="submit" class="secondary-button">Retrieve</button>
           </div>
+        </form>
+        <form id="inspection-form" class="inspection-form" hidden>
+          <label for="inspection-image">Inspect a photo for this asset</label>
+          <input id="inspection-image" name="file" type="file" accept="image/jpeg,image/png,image/webp" required />
+          <span id="inspection-file-name" class="muted">JPEG, PNG, or WebP · maximum 5 MB</span>
+          <button type="submit" class="secondary-button">Analyze photo</button>
+          <p id="inspection-status" class="form-status" role="status"></p>
         </form>
         <div id="lookup-status" class="lookup-status empty-state">
           <span class="empty-icon" aria-hidden="true">◌</span>
@@ -109,6 +116,12 @@ const formStatus = document.querySelector("#form-status");
 const lookupForm = document.querySelector("#lookup-form");
 const lookupStatus = document.querySelector("#lookup-status");
 const assetResult = document.querySelector("#asset-result");
+const inspectionForm = document.querySelector("#inspection-form");
+const inspectionImage = document.querySelector("#inspection-image");
+const inspectionFileName = document.querySelector("#inspection-file-name");
+const inspectionStatus = document.querySelector("#inspection-status");
+let selectedAssetId = null;
+let inspectionInProgress = false;
 let lookupRequestId = 0;
 let activeLookupController = null;
 
@@ -118,9 +131,61 @@ function setHealthState(state, message, details = "") {
   healthDetails.textContent = details;
 }
 
+function renderRiskAssessment(risk) {
+  return `
+    <div class="risk-section">
+      <div class="incident-heading">
+        <h3>Maintenance priority</h3>
+        <span class="risk-priority risk-${escapeHtml(risk.priority)}">${escapeHtml(risk.priority)}</span>
+      </div>
+      <p class="risk-score">Baseline score ${escapeHtml(risk.score)} · assessed ${formatDate(risk.assessed_at)}</p>
+      <h4>Evidence</h4>
+      <ul>${risk.evidence.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
+      ${
+        risk.data_quality_warnings.length
+          ? `<h4>Data quality warnings</h4><ul class="risk-warnings">${risk.data_quality_warnings.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`
+          : ""
+      }
+      <p class="human-review"><strong>Human review required.</strong> This provisional baseline is not an engineering standard or flood probability.</p>
+    </div>
+  `;
+}
+
+function setInspectionStatus(state, message) {
+  inspectionStatus.className = `form-status ${state}`;
+  inspectionStatus.textContent = message;
+}
+
 function setFormStatus(state, message) {
   formStatus.className = `form-status ${state}`;
   formStatus.textContent = message;
+}
+
+function renderInspection(inspection) {
+  if (inspection.status === "failed") {
+    return `<div class="inspection-result error"><strong>Photo analysis failed.</strong><span>Reference: ${escapeHtml(inspection.error_code || "provider error")}</span></div>`;
+  }
+  if (inspection.status === "pending") {
+    return `<div class="inspection-result"><strong>Photo analysis is still processing.</strong><span>Please check this asset again shortly.</span></div>`;
+  }
+  const report = inspection.report;
+  if (!report) {
+    return `<div class="inspection-result error"><strong>Photo analysis is unavailable.</strong><span>Reference: ${escapeHtml(inspection.error_code || "provider error")}</span></div>`;
+  }
+  return `
+    <div class="inspection-result">
+      <div class="inspection-heading">
+        <h3>Photo analysis</h3>
+        <span class="severity-${escapeHtml(report.severity)}">${escapeHtml(report.severity)} severity</span>
+      </div>
+      <p>${escapeHtml(report.summary)}</p>
+      <h4>Observations</h4>
+      <ul>${report.observations.map((item) => `<li><strong>${escapeHtml(item.concern)}</strong> · ${escapeHtml(item.description)}</li>`).join("")}</ul>
+      <h4>Recommended actions</h4>
+      <ul>${report.recommended_actions.map((action) => `<li>${escapeHtml(action)}</li>`).join("")}</ul>
+      <p class="human-review"><strong>Human review required.</strong> This report is advisory and does not certify site safety.</p>
+    </div>
+  `;
 }
 
 function setLookupState(state, message, detail = "") {
@@ -132,7 +197,7 @@ async function requestJson(path, options = {}) {
   let response;
   try {
     const requestOptions = { ...options };
-    if (requestOptions.body) {
+    if (requestOptions.body && !(requestOptions.body instanceof FormData)) {
       requestOptions.headers = {
         "Content-Type": "application/json",
         ...requestOptions.headers,
@@ -151,8 +216,11 @@ async function requestJson(path, options = {}) {
   if (!response.ok) {
     if (response.status === 404) throw new Error("Asset not found.");
     if (response.status === 400) throw new Error("That asset ID is not valid.");
+    if (response.status === 413) throw new Error("The image exceeds the 5 MB limit.");
     if (response.status === 422) throw new Error("Please check the asset details and try again.");
+    if (response.status === 429) throw new Error("Image analysis quota or rate limit was reached.");
     if (response.status === 503) throw new Error("The database is temporarily unavailable.");
+    if (response.status === 502) throw new Error("Image analysis is temporarily unavailable.");
     throw new Error("The request could not be completed.");
   }
 
@@ -172,7 +240,7 @@ async function checkBackendHealth() {
   }
 }
 
-function renderAsset(asset, incidents) {
+function renderAsset(asset, incidents, inspections, risk) {
   assetResult.hidden = false;
   assetResult.innerHTML = `
     <div class="asset-summary">
@@ -204,6 +272,18 @@ function renderAsset(asset, incidents) {
           : `<div class="history-empty">No incidents recorded for this asset.</div>`
       }
     </div>
+    <div class="inspection-history">
+      <div class="incident-heading">
+        <h3>Photo inspections</h3>
+        <span>${inspections.length} recorded</span>
+      </div>
+      ${
+        inspections.length
+          ? inspections.map((inspection) => renderInspection(inspection)).join("")
+          : `<div class="history-empty">No photo inspections recorded for this asset.</div>`
+      }
+    </div>
+    ${renderRiskAssessment(risk)}
   `;
 }
 
@@ -250,6 +330,44 @@ assetForm.addEventListener("submit", async (event) => {
   }
 });
 
+inspectionImage.addEventListener("change", () => {
+  const file = inspectionImage.files[0];
+  inspectionFileName.textContent = file
+    ? `${file.name} · ${(file.size / 1024 / 1024).toFixed(2)} MB`
+    : "JPEG, PNG, or WebP · maximum 5 MB";
+});
+
+inspectionForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const file = inspectionImage.files[0];
+  if (inspectionInProgress || !selectedAssetId || !file) return;
+
+  inspectionInProgress = true;
+  setInspectionStatus("loading", "Uploading photo and analyzing…");
+  const button = inspectionForm.querySelector("button");
+  button.disabled = true;
+  try {
+    const body = new FormData();
+    body.append("file", file);
+    const inspection = await requestJson(
+      `/assets/${encodeURIComponent(selectedAssetId)}/inspections`,
+      { method: "POST", body }
+    );
+    if (inspection.status !== "completed") {
+      throw new Error("Image analysis did not complete.");
+    }
+    assetResult.insertAdjacentHTML("beforeend", renderInspection(inspection));
+    setInspectionStatus("success", "Photo analyzed successfully.");
+    inspectionForm.reset();
+    inspectionFileName.textContent = "JPEG, PNG, or WebP · maximum 5 MB";
+  } catch (error) {
+    setInspectionStatus("error", error.message);
+  } finally {
+    inspectionInProgress = false;
+    button.disabled = false;
+  }
+});
+
 lookupForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const assetId = new FormData(lookupForm).get("asset_id").trim();
@@ -271,12 +389,25 @@ lookupForm.addEventListener("submit", async (event) => {
       requestOptions
     );
     if (requestId !== lookupRequestId) return;
+    selectedAssetId = asset.id;
     const incidents = await requestJson(
       `/assets/${encodeURIComponent(assetId)}/incidents`,
       requestOptions
     );
     if (requestId !== lookupRequestId) return;
-    renderAsset(asset, incidents);
+    const inspections = await requestJson(
+      `/assets/${encodeURIComponent(assetId)}/inspections`,
+      requestOptions
+    );
+    if (requestId !== lookupRequestId) return;
+    const risk = await requestJson(
+      `/assets/${encodeURIComponent(assetId)}/risk-assessments`,
+      { method: "POST", signal: controller.signal }
+    );
+    if (requestId !== lookupRequestId) return;
+    renderAsset(asset, incidents, inspections, risk);
+    inspectionForm.hidden = false;
+    setInspectionStatus("", "");
     lookupStatus.hidden = true;
   } catch (error) {
     if (requestId !== lookupRequestId || error.name === "AbortError") return;

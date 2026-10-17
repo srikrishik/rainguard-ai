@@ -1,3 +1,4 @@
+
 from collections.abc import Mapping
 from typing import Any
 
@@ -59,5 +60,73 @@ class IncidentRepository:
             return list(
                 self.collection.find({"asset_id": asset_id}).sort("occurred_at", -1)
             )
+        except PyMongoError as exc:
+            raise DatabaseUnavailableError from exc
+
+
+class InspectionRepository:
+    """Persist inspection records and their analysis status."""
+
+    def __init__(self, database: Database[Mapping[str, Any]]) -> None:
+        self.collection = database["inspections"]
+
+    def create(self, document: dict[str, Any]) -> dict[str, Any]:
+        try:
+            result = self.collection.insert_one(document)
+            return self.collection.find_one({"_id": result.inserted_id}) or {
+                **document,
+                "_id": result.inserted_id,
+            }
+        except PyMongoError as exc:
+            raise DatabaseUnavailableError from exc
+
+    def update(self, inspection_id: ObjectId, updates: dict[str, Any]) -> None:
+        try:
+            result = self.collection.update_one(
+                {"_id": inspection_id},
+                {"$set": updates},
+            )
+            if result.matched_count == 0:
+                raise DatabaseUnavailableError("Inspection record not found")
+        except PyMongoError as exc:
+            raise DatabaseUnavailableError from exc
+
+    def get(self, inspection_id: ObjectId) -> dict[str, Any] | None:
+        try:
+            return self.collection.find_one({"_id": inspection_id})
+        except PyMongoError as exc:
+            raise DatabaseUnavailableError from exc
+
+    def list_for_asset(self, asset_id: ObjectId) -> list[dict[str, Any]]:
+        try:
+            return list(
+                self.collection.find({"asset_id": asset_id}).sort("created_at", -1)
+            )
+        except PyMongoError as exc:
+            raise DatabaseUnavailableError from exc
+
+
+class RiskAssessmentRepository:
+    """Persist point-in-time baseline risk assessments."""
+
+    def __init__(self, database: Database[Mapping[str, Any]]) -> None:
+        self.collection = database["risk_assessments"]
+
+    def create(self, document: dict[str, Any]) -> dict[str, Any]:
+        try:
+            result = self.collection.insert_one(document)
+            return self.collection.find_one({"_id": result.inserted_id}) or {
+                **document,
+                "_id": result.inserted_id,
+            }
+        except PyMongoError as exc:
+            raise DatabaseUnavailableError from exc
+
+    def get_latest_for_asset(self, asset_id: ObjectId) -> dict[str, Any] | None:
+        try:
+            records = list(
+                self.collection.find({"asset_id": asset_id}).sort("assessed_at", -1)
+            )
+            return records[0] if records else None
         except PyMongoError as exc:
             raise DatabaseUnavailableError from exc

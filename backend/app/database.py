@@ -1,3 +1,4 @@
+
 from collections.abc import Mapping
 from typing import Any
 
@@ -21,6 +22,7 @@ class MongoConnection:
     def connect(self) -> None:
         if not self._settings.mongodb_uri or not self._settings.database_name:
             return
+
         self._client = MongoClient(
             self._settings.mongodb_uri,
             serverSelectionTimeoutMS=2000,
@@ -50,10 +52,35 @@ class MongoConnection:
     def ensure_indexes(self) -> None:
         try:
             database = self.database
-            database["societies"].create_index([("name", ASCENDING)], unique=True)
-            database["assets"].create_index([("society_id", ASCENDING)])
-            database["incidents"].create_index(
-                [("asset_id", ASCENDING), ("occurred_at", DESCENDING)]
+
+            # Existing indexes
+            database["societies"].create_index(
+                [("name", ASCENDING)],
+                unique=True,
             )
+            database["assets"].create_index(
+                [("society_id", ASCENDING)]
+            )
+            database["incidents"].create_index(
+                [
+                    ("asset_id", ASCENDING),
+                    ("occurred_at", DESCENDING),
+                ]
+            )
+
+            # Phase 4: inspection history by asset
+            database["inspections"].create_index(
+                [
+                    ("asset_id", ASCENDING),
+                    ("created_at", DESCENDING),
+                ]
+            )
+            database["risk_assessments"].create_index(
+                [
+                    ("asset_id", ASCENDING),
+                    ("assessed_at", DESCENDING),
+                ]
+            )
+
         except PyMongoError as exc:
             raise DatabaseUnavailableError from exc

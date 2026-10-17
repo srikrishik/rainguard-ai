@@ -155,6 +155,7 @@ input:focus, textarea:focus { border-color: #78d4c3; box-shadow: 0 0 0 0.2rem #7
 .lookup-form { gap: 0.45rem; }
 .lookup-row { display: grid; grid-template-columns: 1fr auto; gap: 0.6rem; }
 .lookup-status { display: grid; min-height: 9rem; place-content: center; gap: 0.35rem; margin-top: 1.5rem; border: 1px dashed #2d5665; border-radius: 0.8rem; color: #8eafb4; text-align: center; }
+.lookup-status[hidden], .inspection-form[hidden] { display: none; }
 .lookup-status strong { color: #c4dadd; }
 .lookup-status.error { border-color: #86545a; }
 .empty-icon { color: #78d4c3; font-size: 2rem; }
@@ -177,6 +178,26 @@ dd { margin: 0.2rem 0 0; color: #d4e5e6; overflow-wrap: anywhere; }
 .incident-list strong { display: block; color: #c9dedf; font-size: 0.9rem; }
 .incident-list small { display: block; margin-top: 0.2rem; color: #789da4; }
 .history-empty { margin-top: 1rem; color: #8eafb4; font-size: 0.88rem; }
+.inspection-form { margin-top: 1.5rem; padding-top: 1.2rem; border-top: 1px solid #24505d; }
+.inspection-form input[type="file"] { padding: 0.55rem; }
+.inspection-result { margin-top: 1.5rem; padding: 1.2rem; border: 1px solid #2d6972; border-radius: 0.8rem; background: #0b2631; }
+.inspection-result.error { border-color: #86545a; color: #ffb1b1; }
+.inspection-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.inspection-heading h3 { margin: 0; }
+.inspection-heading span { color: #78d4c3; font-size: 0.78rem; text-transform: uppercase; }
+.inspection-result h4 { margin: 1rem 0 0.4rem; color: #78d4c3; font-size: 0.78rem; text-transform: uppercase; }
+.inspection-result p { color: #c4dadd; line-height: 1.5; }
+.inspection-result ul { display: grid; gap: 0.45rem; margin: 0; padding-left: 1.2rem; color: #a5c0c5; line-height: 1.45; }
+.human-review { margin: 1.2rem 0 0 !important; color: #f0c58b !important; font-size: 0.82rem; }
+.risk-section { margin-top: 1.5rem; padding-top: 1.2rem; border-top: 1px solid #24505d; }
+.risk-priority { border-radius: 999px; padding: 0.3rem 0.6rem; font-size: 0.72rem; font-weight: 800; text-transform: uppercase; }
+.risk-high { background: #713f48; color: #ffb1b1; }
+.risk-medium { background: #73572f; color: #ffd694; }
+.risk-low { background: #2d665c; color: #a8eed3; }
+.risk-score { color: #8eafb4; font-size: 0.82rem; }
+.risk-section h4 { margin: 1rem 0 0.4rem; color: #78d4c3; font-size: 0.78rem; text-transform: uppercase; }
+.risk-section ul { display: grid; gap: 0.45rem; margin: 0; padding-left: 1.2rem; color: #a5c0c5; line-height: 1.45; }
+.risk-warnings { color: #ffd694 !important; }
 footer { padding: 0 0 2rem; color: #618991; font-size: 0.8rem; }
 footer span { padding: 0 0.4rem; color: #78d4c3; }
 
