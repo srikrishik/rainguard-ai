@@ -193,6 +193,14 @@ def _mission_response(document: dict[str, Any]) -> InspectionMissionResponse:
     )
 
 
+def _utc_response_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _task_response(document: dict[str, Any]) -> MaintenanceTaskResponse:
     return MaintenanceTaskResponse(
         id=str(document["_id"]),
@@ -211,6 +219,9 @@ def _task_response(document: dict[str, Any]) -> MaintenanceTaskResponse:
         reinspection_required=document.get("reinspection_required", False),
         reinspection_status=document.get("reinspection_status", "not_required"),
         reinspection_notes=document.get("reinspection_notes"),
+        reinspection_due_at=_utc_response_datetime(
+            document.get("reinspection_due_at")
+        ),
     )
 
 
@@ -607,17 +618,15 @@ def schedule_reinspection(
         repository = MaintenanceTaskRepository(_connection(request).database)
         if repository.get(object_id) is None:
             raise HTTPException(status_code=404, detail="maintenance task not found")
-        return _task_response(
-            repository.update(
-                object_id,
-                {
-                    "reinspection_required": True,
-                    "reinspection_status": "scheduled",
-                    "reinspection_notes": payload.notes,
-                    "updated_at": datetime.now(timezone.utc),
-                },
-            )
-        )
+        updates = {
+            "reinspection_required": True,
+            "reinspection_status": "scheduled",
+            "reinspection_notes": payload.notes,
+            "updated_at": datetime.now(timezone.utc),
+        }
+        if payload.reinspection_due_at is not None:
+            updates["reinspection_due_at"] = payload.reinspection_due_at
+        return _task_response(repository.update(object_id, updates))
     except DatabaseUnavailableError as exc:
         raise HTTPException(status_code=503, detail="database unavailable") from exc
 

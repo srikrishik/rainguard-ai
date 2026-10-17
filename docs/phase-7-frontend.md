@@ -14,7 +14,11 @@ maintenance tasks. Completed Gemma reports remain advisory and require human
 review; pending and failed inspections are not rendered as completed reports.
 Mission checklist responses and notes can be saved through the existing mission
 PATCH endpoint. Maintenance status, completion evidence, and reinspection
-actions use the existing persisted task endpoints.
+actions use the existing persisted task endpoints. A reinspection request may
+include an optional timezone-aware `reinspection_due_at` timestamp. The
+timestamp is normalized to UTC, persisted on the maintenance task, returned by
+the API, and rendered after refresh. Legacy clients and records without the
+field remain valid.
 
 ## Data boundaries
 
@@ -40,4 +44,6 @@ society selector or weather integration. Risk lookup currently creates a fresh
 baseline assessment through the existing endpoint; this preserves the Phase
 5A contract but can create multiple assessment records when an asset is
 retrieved repeatedly. Field photos and human findings remain subject to the
-existing human-review safeguards.
+existing human-review safeguards. Reinspection is only a persisted scheduling
+request: there is no background scheduler, notification, automatic follow-up
+mission, or automatic inspection execution.

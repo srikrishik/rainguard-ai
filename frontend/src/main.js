@@ -23,7 +23,7 @@ app.innerHTML = `
       <div class="hero-orbit" aria-hidden="true">
         <span class="orbit-ring ring-one"></span>
         <span class="orbit-ring ring-two"></span>
-        <span class="orbit-drop">⌁</span>
+        <span class="orbit-drop">💧</span>
       </div>
     </section>
 
@@ -110,7 +110,7 @@ app.innerHTML = `
           <p id="inspection-status" class="form-status" role="status"></p>
         </form>
         <div id="lookup-status" class="lookup-status empty-state">
-          <span class="empty-icon" aria-hidden="true">◌</span>
+          <span class="empty-icon" aria-hidden="true">◯</span>
           <strong>No asset selected</strong>
           <span>Retrieve an asset to view its maintenance history.</span>
         </div>
@@ -141,6 +141,8 @@ let inspectionInProgress = false;
 let lookupRequestId = 0;
 let activeLookupController = null;
 const missionsById = new Map();
+const tasksByFindingId = new Map();
+let maintenanceTasks = [];
 
 function setHealthState(state, message, details = "") {
   healthIndicator.className = `indicator ${state}`;
@@ -177,9 +179,12 @@ function renderMission(mission) {
     .join("");
   const findings = mission.findings
     .map((finding) => {
-      const action = finding.approved
-        ? `<button type="button" class="text-button create-task-button" data-finding-id="${escapeHtml(finding.id)}" data-description="${escapeHtml(finding.description)}">Create task</button>`
-        : `<button type="button" class="text-button approve-finding-button" data-finding-id="${escapeHtml(finding.id)}">Approve finding</button>`;
+      const task = tasksByFindingId.get(finding.id);
+      const action = task
+        ? `<span class="status-badge status-${escapeHtml(task.status)}">Task ${escapeHtml(task.status)}</span>`
+        : finding.approved
+          ? `<button type="button" class="secondary-button compact-button create-task-button" data-finding-id="${escapeHtml(finding.id)}" data-description="${escapeHtml(finding.description)}">Create task</button>`
+        : `<button type="button" class="secondary-button compact-button approve-finding-button" data-finding-id="${escapeHtml(finding.id)}">Approve finding</button>`;
       return `<li><strong>${escapeHtml(finding.description)}</strong><span>${finding.approved ? "Human-approved" : "Awaiting human approval"}</span>${action}</li>`;
     })
     .join("");
@@ -194,14 +199,14 @@ function renderMission(mission) {
           </li>
         `).join("")}</ol>
         <label>Mission notes <textarea name="notes" rows="2" maxlength="3000">${escapeHtml(mission.notes || "")}</textarea></label>
-        <button type="submit" class="text-button">Save checklist</button>
+        <button type="submit" class="primary-button compact-button">Save checklist</button>
       </form>
       <form class="finding-form">
-        <label>Record a human finding
+        <label>Record an inspection finding
           <select name="checklist_item_id" required>${findingOptions}</select>
-          <textarea name="description" rows="2" required placeholder="What did the team confirm?"></textarea>
+          <textarea name="description" rows="2" required placeholder="Field inspection observations"></textarea>
         </label>
-        <button type="submit" class="secondary-button">Save finding</button>
+        <button type="submit" class="primary-button compact-button">Save finding</button>
       </form>
       ${findings ? `<h4>Findings</h4><ul class="finding-list">${findings}</ul>` : ""}
     </div>
@@ -219,16 +224,43 @@ function renderMaintenance(tasks) {
               const label = task.status === "completed" ? "Completed" : `Mark ${nextStatus === "in_progress" ? "in progress" : "completed"}`;
               const completionForm = task.status !== "in_progress"
                 ? ""
-                : `<form class="task-update-form" data-task-id="${escapeHtml(task.id)}"><input name="completion_notes" placeholder="Completion notes" maxlength="3000" /><input name="evidence_refs" placeholder="Evidence reference (optional)" maxlength="500" /><button type="submit" class="text-button">Save completion</button></form>`;
-              const reinspectionButton = task.reinspection_status === "scheduled"
-                ? "<small>Reinspection scheduled</small>"
-                : `<button type="button" class="text-button reinspection-button" data-task-id="${escapeHtml(task.id)}">Schedule reinspection</button>`;
-              return `<li><strong>${escapeHtml(task.description)}</strong><span>${escapeHtml(task.priority)} · ${escapeHtml(task.status)}</span><button type="button" class="text-button task-status-button" data-task-id="${escapeHtml(task.id)}" data-next-status="${task.status === "completed" ? "" : nextStatus}">${label}</button>${completionForm}${reinspectionButton}</li>`;
+                : `<form class="task-update-form" data-task-id="${escapeHtml(task.id)}"><input name="completion_notes" placeholder="Completion notes" maxlength="3000" /><input name="evidence_refs" placeholder="Evidence reference (optional)" maxlength="500" /><button type="submit" class="secondary-button compact-button">Save completion</button></form>`;
+              const dueInputValue = task.reinspection_due_at
+                ? toDateTimeLocalValue(task.reinspection_due_at)
+                : "";
+              const reinspectionLabel = task.reinspection_status === "scheduled"
+                ? task.reinspection_due_at
+                  ? `Reinspection scheduled for ${escapeHtml(formatDateTime(task.reinspection_due_at))}`
+                  : "Reinspection scheduled"
+                : "Reinspection not scheduled";
+              const reinspectionButton = `<div class="reinspection-controls">
+                <small>${reinspectionLabel}</small>
+                <label>${task.reinspection_status === "scheduled" ? "Change due date and time" : "Optional due date and time"}<input type="datetime-local" class="reinspection-due-input" value="${escapeHtml(dueInputValue)}" /></label>
+                <button type="button" class="secondary-button compact-button reinspection-button" data-task-id="${escapeHtml(task.id)}" data-default-label="${task.reinspection_status === "scheduled" ? "Reschedule reinspection" : "Schedule reinspection"}">${task.reinspection_status === "scheduled" ? "Reschedule reinspection" : "Schedule reinspection"}</button>
+              </div>`;
+              const taskAction = task.status === "completed"
+                ? `<span class="status-badge status-completed">Task completed</span>`
+                : `<button type="button" class="secondary-button compact-button task-status-button" data-task-id="${escapeHtml(task.id)}" data-next-status="${nextStatus}">${label}</button>`;
+              return `<li><strong>${escapeHtml(task.description)}</strong><span>${escapeHtml(task.priority)} · ${escapeHtml(task.status)}</span>${taskAction}${completionForm}${reinspectionButton}</li>`;
             }).join("")}</ul>`
           : `<div class="history-empty">No maintenance tasks recorded for this asset.</div>`
       }
+
     </div>
   `;
+}
+
+function renderMaintenanceState() {
+  const maintenanceSection = assetResult.querySelector(".maintenance-section");
+  if (maintenanceSection) {
+    maintenanceSection.outerHTML = renderMaintenance(maintenanceTasks);
+  }
+  const missionArea = assetResult.querySelector(".mission-area");
+  if (missionArea) {
+    missionArea.innerHTML = Array.from(missionsById.values())
+      .map(renderMission)
+      .join("");
+  }
 }
 
 function setInspectionStatus(state, message) {
@@ -347,6 +379,9 @@ async function checkBackendHealth() {
 }
 
 function renderAsset(asset, incidents, inspections, risk, tasks, missions) {
+  maintenanceTasks = tasks;
+  tasksByFindingId.clear();
+  tasks.forEach((task) => tasksByFindingId.set(task.finding_id, task));
   assetResult.hidden = false;
   assetResult.innerHTML = `
     <div class="asset-summary">
@@ -417,6 +452,34 @@ function formatDate(value) {
     : date.toLocaleDateString(undefined, { dateStyle: "medium" });
 }
 
+function formatDateTime(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? "date unavailable"
+    : date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
+function toDateTimeLocalValue(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (part) => String(part).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function parseDateTimeLocalValue(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(value);
+  if (!match) return null;
+  const [, year, month, day, hours, minutes] = match.map(Number);
+  const date = new Date(year, month - 1, day, hours, minutes);
+  return date.getFullYear() === year
+    && date.getMonth() === month - 1
+    && date.getDate() === day
+    && date.getHours() === hours
+    && date.getMinutes() === minutes
+    ? date
+    : null;
+}
+
 assetResult.addEventListener("click", async (event) => {
   const button = event.target.closest("button");
   if (!button) return;
@@ -441,17 +504,32 @@ assetResult.addEventListener("click", async (event) => {
       return;
     }
     if (button.classList.contains("create-task-button")) {
-      const task = await requestJson("/maintenance-tasks", {
-        method: "POST",
-        body: JSON.stringify({
-          asset_id: selectedAssetId,
-          mission_id: missionCard.dataset.missionId,
-          finding_id: button.dataset.findingId,
-          description: button.dataset.description,
-          priority: "medium",
-        }),
-      });
-      button.textContent = `Task ${task.status}`;
+      if (button.disabled) return;
+      button.disabled = true;
+      try {
+        const task = await requestJson("/maintenance-tasks", {
+          method: "POST",
+          body: JSON.stringify({
+            asset_id: selectedAssetId,
+            mission_id: missionCard.dataset.missionId,
+            finding_id: button.dataset.findingId,
+            description: button.dataset.description,
+            priority: "medium",
+          }),
+        });
+        maintenanceTasks = [
+          ...maintenanceTasks.filter(
+            (existing) => existing.finding_id !== task.finding_id
+          ),
+          task,
+        ];
+        tasksByFindingId.set(task.finding_id, task);
+        renderMaintenanceState();
+        setInspectionStatus("success", "Maintenance task created.");
+      } catch (error) {
+        button.disabled = false;
+        throw error;
+      }
       return;
     }
     if (button.classList.contains("task-status-button") && button.dataset.nextStatus) {
@@ -467,11 +545,37 @@ assetResult.addEventListener("click", async (event) => {
       return;
     }
     if (button.classList.contains("reinspection-button")) {
-      await requestJson(
-        `/maintenance-tasks/${encodeURIComponent(button.dataset.taskId)}/reinspection`,
-        { method: "POST", body: JSON.stringify({ notes: "Follow-up verification requested by the maintenance team." }) }
+      if (button.disabled) return;
+      const dueInput = button.closest(".reinspection-controls")?.querySelector(".reinspection-due-input");
+      const dueValue = dueInput?.value;
+      button.disabled = true;
+      button.textContent = "Scheduling…";
+      let task;
+      try {
+        const dueDate = dueValue ? parseDateTimeLocalValue(dueValue) : null;
+        if (dueValue && !dueDate) {
+          throw new Error("Enter a valid reinspection date and time.");
+        }
+        task = await requestJson(
+          `/maintenance-tasks/${encodeURIComponent(button.dataset.taskId)}/reinspection`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              notes: "Follow-up verification requested by the maintenance team.",
+              ...(dueDate ? { reinspection_due_at: dueDate.toISOString() } : {}),
+            }),
+          }
+        );
+      } catch (error) {
+        button.disabled = false;
+        button.textContent = button.dataset.defaultLabel;
+        throw error;
+      }
+      maintenanceTasks = maintenanceTasks.map((existing) =>
+        existing.id === task.id ? task : existing
       );
-      button.textContent = "Reinspection scheduled";
+      renderMaintenanceState();
+      setInspectionStatus("success", "Reinspection scheduled.");
     }
   } catch (error) {
     setInspectionStatus("error", error.message);

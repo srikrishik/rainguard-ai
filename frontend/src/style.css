@@ -16,7 +16,11 @@ body {
 
 button, input, textarea { font: inherit; }
 button { cursor: pointer; }
-button:disabled { cursor: wait; opacity: 0.65; }
+button:disabled { cursor: not-allowed; opacity: 0.55; }
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: 3px solid #b0f5e7;
+  outline-offset: 2px;
+}
 
 .topbar, .shell, footer { width: min(1120px, calc(100% - 3rem)); margin: 0 auto; }
 
@@ -93,7 +97,7 @@ h1 em { color: #78d4c3; font-style: normal; }
 .orbit-ring { position: absolute; inset: 0; border: 1px solid #78d4c355; border-radius: 50%; }
 .ring-one { transform: rotate(35deg) scaleX(0.55); }
 .ring-two { transform: rotate(-35deg) scaleX(0.55); }
-.orbit-drop { position: absolute; inset: 0; display: grid; place-items: center; color: #78d4c3; font-size: 5rem; transform: rotate(90deg); }
+.orbit-drop { position: absolute; inset: 0; display: grid; place-items: center; color: #78d4c3; font-size: 5rem; transform: none; }
 
 .connection-panel, .panel {
   border: 1px solid #24505d;
@@ -139,15 +143,19 @@ input:focus, textarea:focus { border-color: #78d4c3; box-shadow: 0 0 0 0.2rem #7
   display: flex;
   align-items: center;
   justify-content: space-between;
-  border: 0;
+  border: 1px solid transparent;
   border-radius: 0.65rem;
   padding: 0.8rem 1rem;
   font-weight: 800;
+  transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
 }
 .primary-button { background: #78d4c3; color: #09232d; }
-.secondary-button { justify-content: center; background: #235563; color: #e8f1f2; }
+.secondary-button { justify-content: center; background: #235563; border-color: #4c8c96; color: #e8f1f2; }
 .primary-button:hover { background: #97e6d6; }
 .secondary-button:hover { background: #2d6878; }
+.primary-button:active, .secondary-button:active { transform: translateY(1px); }
+.primary-button:disabled, .secondary-button:disabled { background: #31545b; border-color: #426b70; color: #9ab5b6; }
+.compact-button { width: fit-content; padding: 0.55rem 0.8rem; font-size: 0.8rem; }
 .form-status { min-height: 1.2rem; margin: 0; font-size: 0.82rem; }
 .form-status.loading, .lookup-status.loading { color: #b9d9dc; }
 .form-status.success { color: #7ee2ae; }
@@ -214,6 +222,20 @@ dd { margin: 0.2rem 0 0; color: #d4e5e6; overflow-wrap: anywhere; }
 .checklist, .finding-list, .task-list { display: grid; gap: 0.55rem; margin: 0.7rem 0 0; padding-left: 1.2rem; color: #a5c0c5; line-height: 1.45; }
 .finding-list li, .task-list li { display: grid; gap: 0.25rem; }
 .finding-list span, .task-list span, .task-list small { color: #8eafb4; font-size: 0.8rem; }
+.status-badge {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  border: 1px solid #477b82;
+  border-radius: 999px;
+  padding: 0.25rem 0.55rem;
+  color: #d8f5ed;
+  font-size: 0.75rem;
+  font-weight: 800;
+}
+.status-pending { background: #554827; color: #ffd694; }
+.status-in_progress { background: #244f62; color: #a9e7f0; }
+.status-completed { background: #285946; color: #a8eed3; }
 .text-button { width: fit-content; border: 0; padding: 0; background: transparent; color: #78d4c3; font-size: 0.8rem; font-weight: 700; }
 .mission-card select { width: 100%; border: 1px solid #2e5d68; border-radius: 0.65rem; background: #0b2631; color: #e8f1f2; padding: 0.75rem 0.85rem; }
 .finding-form { margin-top: 1rem; }

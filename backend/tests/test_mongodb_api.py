@@ -754,6 +754,10 @@ def test_inspection_mission_finding_approval_and_task_lifecycle(monkeypatch):
         task = task_response.json()
         assert task_response.status_code == 201
         assert task["status"] == "pending"
+        persisted_tasks = client.get(f"/assets/{asset_id}/maintenance-tasks")
+        assert persisted_tasks.status_code == 200
+        assert persisted_tasks.json()[0]["id"] == task["id"]
+        assert persisted_tasks.json()[0]["status"] == "pending"
 
         duplicate = client.post(
             "/maintenance-tasks",
@@ -768,6 +772,12 @@ def test_inspection_mission_finding_approval_and_task_lifecycle(monkeypatch):
         assert duplicate.status_code == 201
         assert duplicate.json()["id"] == task["id"]
         assert len(database["maintenance_tasks"].documents) == 1
+        legacy_reinspection = client.post(
+            f"/maintenance-tasks/{task['id']}/reinspection",
+            json={"notes": "Follow-up without a due date."},
+        )
+        assert legacy_reinspection.status_code == 200
+        assert legacy_reinspection.json()["reinspection_due_at"] is None
 
         started = client.patch(
             f"/maintenance-tasks/{task['id']}",
@@ -783,18 +793,49 @@ def test_inspection_mission_finding_approval_and_task_lifecycle(monkeypatch):
         )
         reinspection = client.post(
             f"/maintenance-tasks/{task['id']}/reinspection",
-            json={"notes": "Verify flow after the next heavy rain."},
+            json={
+                "notes": "Verify flow after the next heavy rain.",
+                "reinspection_due_at": "2026-10-20T04:30:00+00:00",
+            },
         )
         listed = client.get(f"/assets/{asset_id}/maintenance-tasks")
         dashboard = client.get("/maintenance-tasks")
+        rescheduled = client.post(
+            f"/maintenance-tasks/{task['id']}/reinspection",
+            json={
+                "reinspection_due_at": "2026-10-22T06:45:00+00:00",
+            },
+        )
+        refreshed = client.get(f"/assets/{asset_id}/maintenance-tasks")
 
     assert started.status_code == 200
     assert completed.status_code == 200
     assert completed.json()["completion_notes"] == "Cleared leaves and flushed the opening."
     assert reinspection.status_code == 200
     assert reinspection.json()["reinspection_status"] == "scheduled"
+    assert reinspection.json()["reinspection_due_at"] == "2026-10-20T04:30:00Z"
+    assert reinspection.json()["status"] == "completed"
     assert listed.status_code == 200 and len(listed.json()) == 1
+    assert listed.json()[0]["reinspection_due_at"] == "2026-10-20T04:30:00Z"
     assert dashboard.status_code == 200 and len(dashboard.json()) == 1
+
+    assert rescheduled.status_code == 200
+    assert rescheduled.json()["reinspection_due_at"] == "2026-10-22T06:45:00Z"
+    assert rescheduled.json()["status"] == "completed"
+    assert refreshed.json()[0]["reinspection_due_at"] == "2026-10-22T06:45:00Z"
+
+    india_rescheduled = client.post(
+        f"/maintenance-tasks/{task['id']}/reinspection",
+        json={
+            "reinspection_due_at": "2026-10-17T17:05:00+05:30",
+        },
+    )
+    india_refreshed = client.get(f"/assets/{asset_id}/maintenance-tasks")
+
+    assert india_rescheduled.status_code == 200
+    assert india_rescheduled.json()["reinspection_due_at"] == "2026-10-17T11:35:00Z"
+    assert india_rescheduled.json()["status"] == "completed"
+    assert india_refreshed.json()[0]["reinspection_due_at"] == "2026-10-17T11:35:00Z"
 
 
 def test_mission_and_task_validation_and_missing_ids(monkeypatch):
@@ -821,6 +862,88 @@ def test_mission_and_task_validation_and_missing_ids(monkeypatch):
     assert invalid_finding.status_code == 422
     assert missing_task.status_code == 400
     assert missing_asset_mission.status_code == 404
+
+
+def test_reinspection_rejects_invalid_or_timezone_naive_due_dates(monkeypatch):
+    database, asset_id = asset_database()
+    monkeypatch.setattr(main, "_connection", lambda request: FakeConnection(database))
+
+    with TestClient(main.app) as client:
+        mission = client.post(f"/assets/{asset_id}/inspection-missions").json()
+        finding = client.post(
+            f"/inspection-missions/{mission['id']}/findings",
+            json={
+                "checklist_item_id": "debris-obstruction",
+                "description": "Leaves obstruct the drain opening.",
+            },
+        ).json()["findings"][0]
+        client.post(
+            f"/inspection-missions/{mission['id']}/findings/{finding['id']}/approve"
+        )
+        task = client.post(
+            "/maintenance-tasks",
+            json={
+                "asset_id": str(asset_id),
+                "mission_id": mission["id"],
+                "finding_id": finding["id"],
+                "description": finding["description"],
+                "priority": "medium",
+            },
+        ).json()
+        naive = client.post(
+            f"/maintenance-tasks/{task['id']}/reinspection",
+            json={"reinspection_due_at": "2026-10-20T10:00:00"},
+        )
+        malformed = client.post(
+            f"/maintenance-tasks/{task['id']}/reinspection",
+            json={"reinspection_due_at": "not-a-timestamp"},
+        )
+
+    assert naive.status_code == 422
+    assert malformed.status_code == 422
+
+
+def test_reinspection_response_normalizes_legacy_mongodb_timestamps(monkeypatch):
+    database, asset_id = asset_database()
+    monkeypatch.setattr(main, "_connection", lambda request: FakeConnection(database))
+
+    with TestClient(main.app) as client:
+        mission = client.post(f"/assets/{asset_id}/inspection-missions").json()
+        finding = client.post(
+            f"/inspection-missions/{mission['id']}/findings",
+            json={
+                "checklist_item_id": "debris-obstruction",
+                "description": "Leaves obstruct the drain opening.",
+            },
+        ).json()["findings"][0]
+        client.post(
+            f"/inspection-missions/{mission['id']}/findings/{finding['id']}/approve"
+        )
+        task = client.post(
+            "/maintenance-tasks",
+            json={
+                "asset_id": str(asset_id),
+                "mission_id": mission["id"],
+                "finding_id": finding["id"],
+                "description": finding["description"],
+                "priority": "medium",
+            },
+        ).json()
+        stored_task = database["maintenance_tasks"].documents[0]
+
+        missing = client.get(f"/maintenance-tasks/{task['id']}")
+        stored_task["reinspection_due_at"] = datetime(2026, 10, 23, 5, 19)
+        naive = client.get(f"/maintenance-tasks/{task['id']}")
+        stored_task["reinspection_due_at"] = "legacy-invalid-timestamp"
+        invalid = client.get(f"/maintenance-tasks/{task['id']}")
+
+    assert missing.status_code == 200
+    assert missing.json()["reinspection_due_at"] is None
+    assert naive.status_code == 200
+    assert naive.json()["reinspection_due_at"] == "2026-10-23T05:19:00Z"
+    assert naive.json()["status"] == "pending"
+    assert invalid.status_code == 200
+    assert invalid.json()["reinspection_due_at"] is None
 
 
 def test_task_database_failure_returns_safe_error(monkeypatch):

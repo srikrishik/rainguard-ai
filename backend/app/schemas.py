@@ -1,8 +1,8 @@
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class AssetCreate(BaseModel):
@@ -142,6 +142,16 @@ class ReinspectionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     notes: str | None = Field(default=None, max_length=1000)
+    reinspection_due_at: datetime | None = None
+
+    @field_validator("reinspection_due_at")
+    @classmethod
+    def normalize_due_at(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("reinspection_due_at must include a timezone")
+        return value.astimezone(timezone.utc)
 
 
 class MaintenanceTaskResponse(BaseModel):
@@ -161,3 +171,4 @@ class MaintenanceTaskResponse(BaseModel):
     reinspection_required: bool = False
     reinspection_status: Literal["not_required", "scheduled", "completed"] = "not_required"
     reinspection_notes: str | None = None
+    reinspection_due_at: datetime | None = None
