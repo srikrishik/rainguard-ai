@@ -96,7 +96,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[settings.frontend_origin],
     allow_credentials=False,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "PATCH"],
     allow_headers=["Content-Type"],
 )
 
@@ -258,6 +258,15 @@ def get_asset(asset_id: str, request: Request) -> AssetResponse:
         if asset is None:
             raise HTTPException(status_code=404, detail="asset not found")
         return _asset_response(asset)
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="database unavailable") from exc
+
+
+@app.get("/assets", response_model=list[AssetResponse])
+def list_assets(request: Request) -> list[AssetResponse]:
+    try:
+        assets = AssetRepository(_connection(request).database).list_all()
+        return [_asset_response(asset) for asset in assets]
     except DatabaseUnavailableError as exc:
         raise HTTPException(status_code=503, detail="database unavailable") from exc
 

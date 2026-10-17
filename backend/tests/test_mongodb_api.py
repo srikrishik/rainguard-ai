@@ -161,6 +161,29 @@ def test_asset_can_be_created_and_retrieved(monkeypatch):
     assert get_response.json()["name"] == "North stormwater drain"
 
 
+def test_assets_can_be_listed_for_dashboard(monkeypatch):
+    database, first_id = asset_database()
+    database["assets"].documents.append(
+        {
+            "_id": ObjectId(),
+            "created_at": datetime.now(timezone.utc),
+            "society_id": "society-1",
+            "name": "Gate 2 pump",
+            "location": "Gate 2",
+        }
+    )
+    monkeypatch.setattr(main, "_connection", lambda request: FakeConnection(database))
+
+    with TestClient(main.app) as client:
+        response = client.get("/assets")
+
+    assert response.status_code == 200
+    assert {asset["id"] for asset in response.json()} == {
+        str(first_id),
+        str(database["assets"].documents[1]["_id"]),
+    }
+
+
 def test_asset_rejects_invalid_id_and_missing_asset(monkeypatch):
     monkeypatch.setattr(
         main,
@@ -290,6 +313,7 @@ def asset_database():
     database["assets"].documents.append(
         {
             "_id": asset_id,
+            "created_at": datetime.now(timezone.utc),
             "society_id": "society-1",
             "name": "North drain",
             "location": "Gate A",

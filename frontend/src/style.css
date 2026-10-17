@@ -152,6 +152,15 @@ input:focus, textarea:focus { border-color: #78d4c3; box-shadow: 0 0 0 0.2rem #7
 .form-status.loading, .lookup-status.loading { color: #b9d9dc; }
 .form-status.success { color: #7ee2ae; }
 .form-status.error, .lookup-status.error { color: #ff9c9c; }
+.dashboard-panel { margin-bottom: 1.5rem; }
+.asset-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 0.75rem; }
+.asset-list-item {
+  display: grid; gap: 0.3rem; text-align: left; cursor: pointer;
+  padding: 0.9rem 1rem; border: 1px solid #2b6470; border-radius: 0.8rem;
+  color: #e8f5f2; background: #123b47; font: inherit;
+}
+.asset-list-item:hover, .asset-list-item:focus-visible { border-color: #78d4c3; background: #174a57; }
+.asset-list-item span { color: #a9c8cb; font-size: 0.8rem; }
 .lookup-form { gap: 0.45rem; }
 .lookup-row { display: grid; grid-template-columns: 1fr auto; gap: 0.6rem; }
 .lookup-status { display: grid; min-height: 9rem; place-content: center; gap: 0.35rem; margin-top: 1.5rem; border: 1px dashed #2d5665; border-radius: 0.8rem; color: #8eafb4; text-align: center; }

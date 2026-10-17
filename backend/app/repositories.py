@@ -50,6 +50,12 @@ class AssetRepository:
         except PyMongoError as exc:
             raise DatabaseUnavailableError from exc
 
+    def list_all(self) -> list[dict[str, Any]]:
+        try:
+            return list(self.collection.find({}).sort("created_at", -1))
+        except PyMongoError as exc:
+            raise DatabaseUnavailableError from exc
+
 
 class IncidentRepository:
     def __init__(self, database: Database[Mapping[str, Any]]) -> None:

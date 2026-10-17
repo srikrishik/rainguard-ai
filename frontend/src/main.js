@@ -39,6 +39,19 @@ app.innerHTML = `
       </div>
     </section>
 
+    <section class="panel dashboard-panel" aria-labelledby="dashboard-title">
+      <div class="panel-heading">
+        <div>
+          <p class="section-label">Society dashboard</p>
+          <h2 id="dashboard-title">Assets needing attention</h2>
+        </div>
+        <span id="asset-count" class="panel-number">00</span>
+      </div>
+      <p class="panel-intro">Live asset records from the connected RainGuard API. Rainfall outlook is unavailable because no weather source is configured.</p>
+      <div id="dashboard-status" class="form-status loading" role="status">Loading assets…</div>
+      <div id="asset-list" class="asset-list" hidden></div>
+    </section>
+
     <div class="content-grid">
       <section class="panel" aria-labelledby="create-title">
         <div class="panel-heading">
@@ -120,10 +133,14 @@ const inspectionForm = document.querySelector("#inspection-form");
 const inspectionImage = document.querySelector("#inspection-image");
 const inspectionFileName = document.querySelector("#inspection-file-name");
 const inspectionStatus = document.querySelector("#inspection-status");
+const dashboardStatus = document.querySelector("#dashboard-status");
+const assetList = document.querySelector("#asset-list");
+const assetCount = document.querySelector("#asset-count");
 let selectedAssetId = null;
 let inspectionInProgress = false;
 let lookupRequestId = 0;
 let activeLookupController = null;
+const missionsById = new Map();
 
 function setHealthState(state, message, details = "") {
   healthIndicator.className = `indicator ${state}`;
@@ -169,7 +186,16 @@ function renderMission(mission) {
   return `
     <div class="mission-card" data-mission-id="${escapeHtml(mission.id)}">
       <div class="incident-heading"><h4>Inspection mission</h4><span>${escapeHtml(mission.status)}</span></div>
-      <ol class="checklist">${mission.checklist.map((item) => `<li>${escapeHtml(item.prompt)}</li>`).join("")}</ol>
+      <form class="checklist-form">
+        <ol class="checklist">${mission.checklist.map((item) => `
+          <li>
+            <label><input type="checkbox" name="completed" value="${escapeHtml(item.id)}" ${item.completed ? "checked" : ""} /> ${escapeHtml(item.prompt)}</label>
+            <input name="response-${escapeHtml(item.id)}" value="${escapeHtml(item.response || "")}" maxlength="1000" placeholder="Field note (optional)" />
+          </li>
+        `).join("")}</ol>
+        <label>Mission notes <textarea name="notes" rows="2" maxlength="3000">${escapeHtml(mission.notes || "")}</textarea></label>
+        <button type="submit" class="text-button">Save checklist</button>
+      </form>
       <form class="finding-form">
         <label>Record a human finding
           <select name="checklist_item_id" required>${findingOptions}</select>
@@ -281,6 +307,31 @@ async function requestJson(path, options = {}) {
   return response.json();
 }
 
+function renderAssetList(assets) {
+  assetCount.textContent = String(assets.length).padStart(2, "0");
+  assetList.hidden = false;
+  assetList.innerHTML = assets.length
+    ? assets.map((asset) => `
+      <button type="button" class="asset-list-item" data-asset-id="${escapeHtml(asset.id)}">
+        <strong>${escapeHtml(asset.name)}</strong>
+        <span>${escapeHtml(asset.location || "Location not specified")} · ${escapeHtml(asset.society_id)}</span>
+      </button>
+    `).join("")
+    : `<div class="history-empty">No assets are registered yet.</div>`;
+}
+
+async function loadDashboard() {
+  try {
+    const assets = await requestJson("/assets");
+    renderAssetList(assets);
+    dashboardStatus.className = "form-status success";
+    dashboardStatus.textContent = `${assets.length} asset${assets.length === 1 ? "" : "s"} available`;
+  } catch (error) {
+    dashboardStatus.className = "form-status error";
+    dashboardStatus.textContent = error.message;
+  }
+}
+
 async function checkBackendHealth() {
   setHealthState("loading", "Checking connection…");
   try {
@@ -288,6 +339,7 @@ async function checkBackendHealth() {
     if (health.status !== "ok" || health.service !== "rainguard-api") {
       throw new Error("The backend returned an unexpected health response.");
     }
+
     setHealthState("success", "Connected", `${health.service} · ${apiBaseUrl}`);
   } catch (error) {
     setHealthState("error", "Connection unavailable", error.message);
@@ -342,7 +394,7 @@ function renderAsset(asset, incidents, inspections, risk, tasks, missions) {
       <div class="incident-heading"><h3>Inspection to maintenance</h3></div>
       <p class="muted">Generate a checklist, record human findings, and approve only confirmed work.</p>
       <button type="button" class="secondary-button mission-button">Generate inspection mission</button>
-      <div class="mission-area">${missions.length ? renderMission(missions[0]) : ""}</div>
+      <div class="mission-area">${missions.length ? missions.map(renderMission).join("") : ""}</div>
     </div>
     ${renderMaintenance(tasks)}
   `;
@@ -375,7 +427,8 @@ assetResult.addEventListener("click", async (event) => {
         `/assets/${encodeURIComponent(selectedAssetId)}/inspection-missions`,
         { method: "POST" }
       );
-      assetResult.querySelector(".mission-area").innerHTML = renderMission(mission);
+      missionsById.set(mission.id, mission);
+      assetResult.querySelector(".mission-area").innerHTML = Array.from(missionsById.values()).map(renderMission).join("");
       return;
     }
     if (button.classList.contains("approve-finding-button")) {
@@ -383,7 +436,8 @@ assetResult.addEventListener("click", async (event) => {
         `/inspection-missions/${encodeURIComponent(missionCard.dataset.missionId)}/findings/${encodeURIComponent(button.dataset.findingId)}/approve`,
         { method: "POST" }
       );
-      assetResult.querySelector(".mission-area").innerHTML = renderMission(mission);
+      missionsById.set(mission.id, mission);
+      assetResult.querySelector(".mission-area").innerHTML = Array.from(missionsById.values()).map(renderMission).join("");
       return;
     }
     if (button.classList.contains("create-task-button")) {
@@ -448,6 +502,37 @@ assetResult.addEventListener("submit", async (event) => {
     }
     return;
   }
+  if (event.target.classList.contains("checklist-form")) {
+    event.preventDefault();
+    const form = event.target;
+    const missionCard = form.closest(".mission-card");
+    const mission = missionsById.get(missionCard.dataset.missionId);
+    if (!mission) return;
+    const formData = new FormData(form);
+    const completed = new Set(formData.getAll("completed"));
+    const checklist = mission.checklist.map((item) => ({
+      ...item,
+      completed: completed.has(item.id),
+      response: formData.get(`response-${item.id}`) || null,
+    }));
+    try {
+      const updatedMission = await requestJson(
+        `/inspection-missions/${encodeURIComponent(mission.id)}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            checklist,
+            notes: formData.get("notes") || null,
+          }),
+        }
+      );
+      missionsById.set(updatedMission.id, updatedMission);
+      assetResult.querySelector(".mission-area").innerHTML = Array.from(missionsById.values()).map(renderMission).join("");
+    } catch (error) {
+      setInspectionStatus("error", error.message);
+    }
+    return;
+  }
   if (!event.target.classList.contains("finding-form")) return;
   event.preventDefault();
   const form = event.target;
@@ -458,7 +543,8 @@ assetResult.addEventListener("submit", async (event) => {
       `/inspection-missions/${encodeURIComponent(missionCard.dataset.missionId)}/findings`,
       { method: "POST", body: JSON.stringify(payload) }
     );
-    assetResult.querySelector(".mission-area").innerHTML = renderMission(mission);
+    missionsById.set(mission.id, mission);
+    assetResult.querySelector(".mission-area").innerHTML = Array.from(missionsById.values()).map(renderMission).join("");
   } catch (error) {
     setInspectionStatus("error", error.message);
   }
@@ -483,11 +569,19 @@ assetForm.addEventListener("submit", async (event) => {
     setFormStatus("success", `Asset created · ${asset.id}`);
     assetForm.reset();
     document.querySelector("#asset-id").value = asset.id;
+    loadDashboard();
   } catch (error) {
     setFormStatus("error", error.message);
   } finally {
     button.disabled = false;
   }
+});
+
+assetList.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-asset-id]");
+  if (!button) return;
+  document.querySelector("#asset-id").value = button.dataset.assetId;
+  lookupForm.requestSubmit();
 });
 
 inspectionImage.addEventListener("change", () => {
@@ -575,6 +669,8 @@ lookupForm.addEventListener("submit", async (event) => {
       requestOptions
     );
     if (requestId !== lookupRequestId) return;
+    missionsById.clear();
+    missions.forEach((mission) => missionsById.set(mission.id, mission));
     renderAsset(asset, incidents, inspections, risk, tasks, missions);
     inspectionForm.hidden = false;
     setInspectionStatus("", "");
@@ -599,3 +695,4 @@ lookupForm.addEventListener("submit", async (event) => {
 });
 
 checkBackendHealth();
+loadDashboard();
