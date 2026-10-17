@@ -151,6 +151,60 @@ function renderRiskAssessment(risk) {
   `;
 }
 
+function renderMission(mission) {
+  const findingOptions = mission.checklist
+    .map(
+      (item) =>
+        `<option value="${escapeHtml(item.id)}">${escapeHtml(item.prompt)}</option>`
+    )
+    .join("");
+  const findings = mission.findings
+    .map((finding) => {
+      const action = finding.approved
+        ? `<button type="button" class="text-button create-task-button" data-finding-id="${escapeHtml(finding.id)}" data-description="${escapeHtml(finding.description)}">Create task</button>`
+        : `<button type="button" class="text-button approve-finding-button" data-finding-id="${escapeHtml(finding.id)}">Approve finding</button>`;
+      return `<li><strong>${escapeHtml(finding.description)}</strong><span>${finding.approved ? "Human-approved" : "Awaiting human approval"}</span>${action}</li>`;
+    })
+    .join("");
+  return `
+    <div class="mission-card" data-mission-id="${escapeHtml(mission.id)}">
+      <div class="incident-heading"><h4>Inspection mission</h4><span>${escapeHtml(mission.status)}</span></div>
+      <ol class="checklist">${mission.checklist.map((item) => `<li>${escapeHtml(item.prompt)}</li>`).join("")}</ol>
+      <form class="finding-form">
+        <label>Record a human finding
+          <select name="checklist_item_id" required>${findingOptions}</select>
+          <textarea name="description" rows="2" required placeholder="What did the team confirm?"></textarea>
+        </label>
+        <button type="submit" class="secondary-button">Save finding</button>
+      </form>
+      ${findings ? `<h4>Findings</h4><ul class="finding-list">${findings}</ul>` : ""}
+    </div>
+  `;
+}
+
+function renderMaintenance(tasks) {
+  return `
+    <div class="maintenance-section">
+      <div class="incident-heading"><h3>Maintenance tasks</h3><span>${tasks.length} recorded</span></div>
+      ${
+        tasks.length
+          ? `<ul class="task-list">${tasks.map((task) => {
+              const nextStatus = task.status === "pending" ? "in_progress" : "completed";
+              const label = task.status === "completed" ? "Completed" : `Mark ${nextStatus === "in_progress" ? "in progress" : "completed"}`;
+              const completionForm = task.status !== "in_progress"
+                ? ""
+                : `<form class="task-update-form" data-task-id="${escapeHtml(task.id)}"><input name="completion_notes" placeholder="Completion notes" maxlength="3000" /><input name="evidence_refs" placeholder="Evidence reference (optional)" maxlength="500" /><button type="submit" class="text-button">Save completion</button></form>`;
+              const reinspectionButton = task.reinspection_status === "scheduled"
+                ? "<small>Reinspection scheduled</small>"
+                : `<button type="button" class="text-button reinspection-button" data-task-id="${escapeHtml(task.id)}">Schedule reinspection</button>`;
+              return `<li><strong>${escapeHtml(task.description)}</strong><span>${escapeHtml(task.priority)} · ${escapeHtml(task.status)}</span><button type="button" class="text-button task-status-button" data-task-id="${escapeHtml(task.id)}" data-next-status="${task.status === "completed" ? "" : nextStatus}">${label}</button>${completionForm}${reinspectionButton}</li>`;
+            }).join("")}</ul>`
+          : `<div class="history-empty">No maintenance tasks recorded for this asset.</div>`
+      }
+    </div>
+  `;
+}
+
 function setInspectionStatus(state, message) {
   inspectionStatus.className = `form-status ${state}`;
   inspectionStatus.textContent = message;
@@ -240,7 +294,7 @@ async function checkBackendHealth() {
   }
 }
 
-function renderAsset(asset, incidents, inspections, risk) {
+function renderAsset(asset, incidents, inspections, risk, tasks, missions) {
   assetResult.hidden = false;
   assetResult.innerHTML = `
     <div class="asset-summary">
@@ -284,6 +338,13 @@ function renderAsset(asset, incidents, inspections, risk) {
       }
     </div>
     ${renderRiskAssessment(risk)}
+    <div class="maintenance-workflow">
+      <div class="incident-heading"><h3>Inspection to maintenance</h3></div>
+      <p class="muted">Generate a checklist, record human findings, and approve only confirmed work.</p>
+      <button type="button" class="secondary-button mission-button">Generate inspection mission</button>
+      <div class="mission-area">${missions.length ? renderMission(missions[0]) : ""}</div>
+    </div>
+    ${renderMaintenance(tasks)}
   `;
 }
 
@@ -303,6 +364,105 @@ function formatDate(value) {
     ? "Date unavailable"
     : date.toLocaleDateString(undefined, { dateStyle: "medium" });
 }
+
+assetResult.addEventListener("click", async (event) => {
+  const button = event.target.closest("button");
+  if (!button) return;
+  const missionCard = button.closest(".mission-card");
+  try {
+    if (button.classList.contains("mission-button")) {
+      const mission = await requestJson(
+        `/assets/${encodeURIComponent(selectedAssetId)}/inspection-missions`,
+        { method: "POST" }
+      );
+      assetResult.querySelector(".mission-area").innerHTML = renderMission(mission);
+      return;
+    }
+    if (button.classList.contains("approve-finding-button")) {
+      const mission = await requestJson(
+        `/inspection-missions/${encodeURIComponent(missionCard.dataset.missionId)}/findings/${encodeURIComponent(button.dataset.findingId)}/approve`,
+        { method: "POST" }
+      );
+      assetResult.querySelector(".mission-area").innerHTML = renderMission(mission);
+      return;
+    }
+    if (button.classList.contains("create-task-button")) {
+      const task = await requestJson("/maintenance-tasks", {
+        method: "POST",
+        body: JSON.stringify({
+          asset_id: selectedAssetId,
+          mission_id: missionCard.dataset.missionId,
+          finding_id: button.dataset.findingId,
+          description: button.dataset.description,
+          priority: "medium",
+        }),
+      });
+      button.textContent = `Task ${task.status}`;
+      return;
+    }
+    if (button.classList.contains("task-status-button") && button.dataset.nextStatus) {
+      const task = await requestJson(
+        `/maintenance-tasks/${encodeURIComponent(button.dataset.taskId)}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ status: button.dataset.nextStatus }),
+        }
+      );
+      button.textContent = task.status === "completed" ? "Completed" : `Mark ${task.status === "pending" ? "in progress" : "completed"}`;
+      button.dataset.nextStatus = task.status === "completed" ? "" : "completed";
+      return;
+    }
+    if (button.classList.contains("reinspection-button")) {
+      await requestJson(
+        `/maintenance-tasks/${encodeURIComponent(button.dataset.taskId)}/reinspection`,
+        { method: "POST", body: JSON.stringify({ notes: "Follow-up verification requested by the maintenance team." }) }
+      );
+      button.textContent = "Reinspection scheduled";
+    }
+  } catch (error) {
+    setInspectionStatus("error", error.message);
+  }
+});
+
+assetResult.addEventListener("submit", async (event) => {
+  if (event.target.classList.contains("task-update-form")) {
+    event.preventDefault();
+    const form = event.target;
+    const values = Object.fromEntries(new FormData(form).entries());
+    const evidence = values.evidence_refs ? [values.evidence_refs] : [];
+    try {
+      await requestJson(
+        `/maintenance-tasks/${encodeURIComponent(form.dataset.taskId)}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            status: "completed",
+            completion_notes: values.completion_notes || null,
+            evidence_refs: evidence,
+          }),
+        }
+      );
+      form.innerHTML = "<span>Completion saved.</span>";
+    } catch (error) {
+      setInspectionStatus("error", error.message);
+    }
+    return;
+  }
+  if (!event.target.classList.contains("finding-form")) return;
+  event.preventDefault();
+  const form = event.target;
+  const missionCard = form.closest(".mission-card");
+  const payload = Object.fromEntries(new FormData(form).entries());
+  try {
+    const mission = await requestJson(
+      `/inspection-missions/${encodeURIComponent(missionCard.dataset.missionId)}/findings`,
+      { method: "POST", body: JSON.stringify(payload) }
+    );
+    assetResult.querySelector(".mission-area").innerHTML = renderMission(mission);
+  } catch (error) {
+    setInspectionStatus("error", error.message);
+  }
+});
 
 assetForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -405,7 +565,17 @@ lookupForm.addEventListener("submit", async (event) => {
       { method: "POST", signal: controller.signal }
     );
     if (requestId !== lookupRequestId) return;
-    renderAsset(asset, incidents, inspections, risk);
+    const tasks = await requestJson(
+      `/assets/${encodeURIComponent(assetId)}/maintenance-tasks`,
+      requestOptions
+    );
+    if (requestId !== lookupRequestId) return;
+    const missions = await requestJson(
+      `/assets/${encodeURIComponent(assetId)}/inspection-missions`,
+      requestOptions
+    );
+    if (requestId !== lookupRequestId) return;
+    renderAsset(asset, incidents, inspections, risk, tasks, missions);
     inspectionForm.hidden = false;
     setInspectionStatus("", "");
     lookupStatus.hidden = true;

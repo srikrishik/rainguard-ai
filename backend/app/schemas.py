@@ -1,6 +1,6 @@
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -78,3 +78,86 @@ class RiskAssessmentResponse(BaseModel):
     requires_human_review: bool
     method: str
     method_version: str
+
+
+class ChecklistItem(BaseModel):
+    id: str
+    prompt: str
+    completed: bool = False
+    response: str | None = Field(default=None, max_length=1000)
+
+
+class InspectionMissionResponse(BaseModel):
+    id: str
+    asset_id: str
+    status: Literal["planned", "in_progress", "completed"]
+    checklist: list[ChecklistItem]
+    notes: str | None = None
+    findings: list[dict[str, Any]] = Field(default_factory=list)
+    inspection_ids: list[str] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class MissionFindingCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    checklist_item_id: str = Field(min_length=1, max_length=100)
+    description: str = Field(min_length=1, max_length=1000)
+    inspection_id: str | None = None
+    evidence_refs: list[str] = Field(default_factory=list, max_length=10)
+
+
+class MissionUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    notes: str | None = Field(default=None, max_length=3000)
+    checklist: list[ChecklistItem] | None = None
+    status: Literal["planned", "in_progress", "completed"] | None = None
+
+
+class MaintenanceTaskCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    asset_id: str
+    mission_id: str
+    finding_id: str
+    description: str = Field(min_length=1, max_length=1000)
+    priority: Literal["high", "medium", "low"]
+    assignee: str | None = Field(default=None, max_length=200)
+    due_date: datetime | None = None
+    completion_notes: str | None = Field(default=None, max_length=3000)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=10)
+
+
+class MaintenanceTaskUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["pending", "in_progress", "completed"] | None = None
+    completion_notes: str | None = Field(default=None, max_length=3000)
+    evidence_refs: list[str] | None = Field(default=None, max_length=10)
+
+
+class ReinspectionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    notes: str | None = Field(default=None, max_length=1000)
+
+
+class MaintenanceTaskResponse(BaseModel):
+    id: str
+    asset_id: str
+    mission_id: str
+    finding_id: str
+    description: str
+    priority: Literal["high", "medium", "low"]
+    assignee: str | None = None
+    due_date: datetime | None = None
+    status: Literal["pending", "in_progress", "completed"]
+    created_at: datetime
+    updated_at: datetime
+    completion_notes: str | None = None
+    evidence_refs: list[str] = Field(default_factory=list)
+    reinspection_required: bool = False
+    reinspection_status: Literal["not_required", "scheduled", "completed"] = "not_required"
+    reinspection_notes: str | None = None

@@ -21,7 +21,9 @@ from app.gemma_service import (
 from app.repositories import (
     AssetRepository,
     IncidentRepository,
+    InspectionMissionRepository,
     InspectionRepository,
+    MaintenanceTaskRepository,
     RiskAssessmentRepository,
 )
 from app.risk_service import assess_asset_risk
@@ -31,6 +33,13 @@ from app.schemas import (
     GemmaReport,
     IncidentResponse,
     InspectionResponse,
+    InspectionMissionResponse,
+    MaintenanceTaskCreate,
+    MaintenanceTaskResponse,
+    MaintenanceTaskUpdate,
+    MissionFindingCreate,
+    MissionUpdate,
+    ReinspectionCreate,
     RiskAssessmentResponse,
 )
 
@@ -170,6 +179,41 @@ def _risk_response(document: dict[str, Any]) -> RiskAssessmentResponse:
     )
 
 
+def _mission_response(document: dict[str, Any]) -> InspectionMissionResponse:
+    return InspectionMissionResponse(
+        id=str(document["_id"]),
+        asset_id=str(document["asset_id"]),
+        status=document["status"],
+        checklist=document["checklist"],
+        notes=document.get("notes"),
+        findings=document.get("findings", []),
+        inspection_ids=[str(value) for value in document.get("inspection_ids", [])],
+        created_at=document["created_at"],
+        updated_at=document["updated_at"],
+    )
+
+
+def _task_response(document: dict[str, Any]) -> MaintenanceTaskResponse:
+    return MaintenanceTaskResponse(
+        id=str(document["_id"]),
+        asset_id=str(document["asset_id"]),
+        mission_id=str(document["mission_id"]),
+        finding_id=str(document["finding_id"]),
+        description=document["description"],
+        priority=document["priority"],
+        assignee=document.get("assignee"),
+        due_date=document.get("due_date"),
+        status=document["status"],
+        created_at=document["created_at"],
+        updated_at=document["updated_at"],
+        completion_notes=document.get("completion_notes"),
+        evidence_refs=document.get("evidence_refs", []),
+        reinspection_required=document.get("reinspection_required", False),
+        reinspection_status=document.get("reinspection_status", "not_required"),
+        reinspection_notes=document.get("reinspection_notes"),
+    )
+
+
 def _gemma_service(request: Request) -> GemmaService:
     service = getattr(request.app.state, "gemma", None)
     if not isinstance(service, GemmaService):
@@ -252,6 +296,319 @@ def get_asset_inspections(
             object_id
         )
         return [_inspection_response(inspection) for inspection in inspections]
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="database unavailable") from exc
+
+
+def _record_object_id(value: str, label: str) -> ObjectId:
+    try:
+        return ObjectId(value)
+    except InvalidId as exc:
+        raise HTTPException(status_code=400, detail=f"invalid {label} id") from exc
+
+
+def _mission_checklist(asset: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {"id": "opening-clear", "prompt": "Is the drain opening clear?", "completed": False},
+        {"id": "debris-obstruction", "prompt": "Is debris obstructing water flow?", "completed": False},
+        {"id": "standing-water", "prompt": "Is standing water present nearby?", "completed": False},
+        {"id": "visible-damage", "prompt": "Are there visible signs of blockage or damage?", "completed": False},
+        {"id": "photographs", "prompt": "Are photographs required to document the condition?", "completed": False},
+        {"id": "maintenance-attention", "prompt": "Does the issue require maintenance-team attention?", "completed": False},
+    ]
+
+
+@app.post(
+    "/assets/{asset_id}/inspection-missions",
+    response_model=InspectionMissionResponse,
+    status_code=201,
+)
+def create_inspection_mission(
+    asset_id: str, request: Request
+) -> InspectionMissionResponse:
+    object_id = _object_id(asset_id)
+    try:
+        database = _connection(request).database
+        if AssetRepository(database).get(object_id) is None:
+            raise HTTPException(status_code=404, detail="asset not found")
+        now = datetime.now(timezone.utc)
+        document = {
+            "_id": ObjectId(),
+            "asset_id": object_id,
+            "status": "planned",
+            "checklist": _mission_checklist({}),
+            "findings": [],
+            "inspection_ids": [],
+            "created_at": now,
+            "updated_at": now,
+        }
+        created = InspectionMissionRepository(database).create(document)
+        return _mission_response(created)
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="database unavailable") from exc
+
+
+@app.get(
+    "/assets/{asset_id}/inspection-missions",
+    response_model=list[InspectionMissionResponse],
+)
+def list_asset_missions(asset_id: str, request: Request) -> list[InspectionMissionResponse]:
+    object_id = _object_id(asset_id)
+    try:
+        missions = InspectionMissionRepository(_connection(request).database).list_for_asset(
+            object_id
+        )
+        return [_mission_response(mission) for mission in missions]
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="database unavailable") from exc
+
+
+@app.get("/inspection-missions/{mission_id}", response_model=InspectionMissionResponse)
+def get_inspection_mission(mission_id: str, request: Request) -> InspectionMissionResponse:
+    object_id = _record_object_id(mission_id, "mission")
+    try:
+        mission = InspectionMissionRepository(_connection(request).database).get(object_id)
+        if mission is None:
+            raise HTTPException(status_code=404, detail="inspection mission not found")
+        return _mission_response(mission)
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="database unavailable") from exc
+
+
+@app.patch("/inspection-missions/{mission_id}", response_model=InspectionMissionResponse)
+def update_inspection_mission(
+    mission_id: str, payload: MissionUpdate, request: Request
+) -> InspectionMissionResponse:
+    object_id = _record_object_id(mission_id, "mission")
+    try:
+        repository = InspectionMissionRepository(_connection(request).database)
+        mission = repository.get(object_id)
+        if mission is None:
+            raise HTTPException(status_code=404, detail="inspection mission not found")
+        updates = payload.model_dump(exclude_none=True)
+        if "checklist" in updates:
+            known = {item["id"] for item in mission["checklist"]}
+            if {item["id"] for item in updates["checklist"]} != known:
+                raise HTTPException(status_code=422, detail="checklist items do not match mission")
+        if "status" in updates:
+            current = mission["status"]
+            allowed = {
+                "planned": {"planned", "in_progress"},
+                "in_progress": {"in_progress", "completed"},
+                "completed": {"completed"},
+            }
+            if updates["status"] not in allowed[current]:
+                raise HTTPException(status_code=422, detail="invalid mission status transition")
+        updates["updated_at"] = datetime.now(timezone.utc)
+        return _mission_response(repository.update(object_id, updates))
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="database unavailable") from exc
+
+
+@app.post(
+    "/inspection-missions/{mission_id}/findings",
+    response_model=InspectionMissionResponse,
+    status_code=201,
+)
+def add_mission_finding(
+    mission_id: str, payload: MissionFindingCreate, request: Request
+) -> InspectionMissionResponse:
+    mission_object_id = _record_object_id(mission_id, "mission")
+    try:
+        database = _connection(request).database
+        repository = InspectionMissionRepository(database)
+        mission = repository.get(mission_object_id)
+        if mission is None:
+            raise HTTPException(status_code=404, detail="inspection mission not found")
+        if payload.checklist_item_id not in {item["id"] for item in mission["checklist"]}:
+            raise HTTPException(status_code=422, detail="checklist item does not exist")
+        if payload.inspection_id is not None:
+            _record_object_id(payload.inspection_id, "inspection")
+        finding = {
+            "id": str(ObjectId()),
+            "checklist_item_id": payload.checklist_item_id,
+            "description": payload.description,
+            "inspection_id": payload.inspection_id,
+            "evidence_refs": payload.evidence_refs,
+            "approved": False,
+            "created_at": datetime.now(timezone.utc),
+        }
+        findings = [*mission.get("findings", []), finding]
+        updated = repository.update(
+            mission_object_id,
+            {"findings": findings, "status": "in_progress", "updated_at": datetime.now(timezone.utc)},
+        )
+        return _mission_response(updated)
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="database unavailable") from exc
+
+
+@app.post(
+    "/inspection-missions/{mission_id}/findings/{finding_id}/approve",
+    response_model=InspectionMissionResponse,
+)
+def approve_mission_finding(
+    mission_id: str, finding_id: str, request: Request
+) -> InspectionMissionResponse:
+    mission_object_id = _record_object_id(mission_id, "mission")
+    try:
+        repository = InspectionMissionRepository(_connection(request).database)
+        mission = repository.get(mission_object_id)
+        if mission is None:
+            raise HTTPException(status_code=404, detail="inspection mission not found")
+        findings = mission.get("findings", [])
+        if not any(finding["id"] == finding_id for finding in findings):
+            raise HTTPException(status_code=404, detail="finding not found")
+        for finding in findings:
+            if finding["id"] == finding_id:
+                finding["approved"] = True
+                finding["approved_at"] = datetime.now(timezone.utc)
+        return _mission_response(
+            repository.update(
+                mission_object_id,
+                {"findings": findings, "updated_at": datetime.now(timezone.utc)},
+            )
+        )
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="database unavailable") from exc
+
+
+@app.post(
+    "/maintenance-tasks",
+    response_model=MaintenanceTaskResponse,
+    status_code=201,
+)
+def create_maintenance_task(
+    payload: MaintenanceTaskCreate, request: Request
+) -> MaintenanceTaskResponse:
+    asset_object_id = _object_id(payload.asset_id)
+    mission_object_id = _record_object_id(payload.mission_id, "mission")
+    try:
+        database = _connection(request).database
+        if AssetRepository(database).get(asset_object_id) is None:
+            raise HTTPException(status_code=404, detail="asset not found")
+        mission = InspectionMissionRepository(database).get(mission_object_id)
+        if mission is None or mission["asset_id"] != asset_object_id:
+            raise HTTPException(status_code=404, detail="inspection mission not found")
+        finding = next(
+            (item for item in mission.get("findings", []) if item["id"] == payload.finding_id),
+            None,
+        )
+        if finding is None:
+            raise HTTPException(status_code=404, detail="finding not found")
+        if not finding.get("approved", False):
+            raise HTTPException(status_code=409, detail="finding requires human approval")
+        now = datetime.now(timezone.utc)
+        document = {
+            "_id": ObjectId(),
+            "asset_id": asset_object_id,
+            "mission_id": mission_object_id,
+            "finding_id": payload.finding_id,
+            "description": payload.description,
+            "priority": payload.priority,
+            "assignee": payload.assignee,
+            "due_date": payload.due_date,
+            "status": "pending",
+            "created_at": now,
+            "updated_at": now,
+            "completion_notes": payload.completion_notes,
+            "evidence_refs": payload.evidence_refs,
+            "reinspection_required": False,
+            "reinspection_status": "not_required",
+        }
+        task = MaintenanceTaskRepository(database).create(document)
+        return _task_response(task)
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="database unavailable") from exc
+
+
+@app.get("/maintenance-tasks", response_model=list[MaintenanceTaskResponse])
+def list_maintenance_tasks(request: Request) -> list[MaintenanceTaskResponse]:
+    try:
+        tasks = MaintenanceTaskRepository(_connection(request).database).list_all()
+        return [_task_response(task) for task in tasks]
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="database unavailable") from exc
+
+
+@app.get(
+    "/assets/{asset_id}/maintenance-tasks",
+    response_model=list[MaintenanceTaskResponse],
+)
+def list_asset_maintenance_tasks(
+    asset_id: str, request: Request
+) -> list[MaintenanceTaskResponse]:
+    object_id = _object_id(asset_id)
+    try:
+        tasks = MaintenanceTaskRepository(_connection(request).database).list_for_asset(
+            object_id
+        )
+        return [_task_response(task) for task in tasks]
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="database unavailable") from exc
+
+
+@app.get("/maintenance-tasks/{task_id}", response_model=MaintenanceTaskResponse)
+def get_maintenance_task(task_id: str, request: Request) -> MaintenanceTaskResponse:
+    object_id = _record_object_id(task_id, "task")
+    try:
+        task = MaintenanceTaskRepository(_connection(request).database).get(object_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="maintenance task not found")
+        return _task_response(task)
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="database unavailable") from exc
+
+
+@app.patch("/maintenance-tasks/{task_id}", response_model=MaintenanceTaskResponse)
+def update_maintenance_task(
+    task_id: str, payload: MaintenanceTaskUpdate, request: Request
+) -> MaintenanceTaskResponse:
+    object_id = _record_object_id(task_id, "task")
+    try:
+        repository = MaintenanceTaskRepository(_connection(request).database)
+        task = repository.get(object_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="maintenance task not found")
+        updates = payload.model_dump(exclude_none=True)
+        if "status" in updates:
+            current = task["status"]
+            allowed = {
+                "pending": {"pending", "in_progress"},
+                "in_progress": {"in_progress", "completed"},
+                "completed": {"completed"},
+            }
+            if updates["status"] not in allowed[current]:
+                raise HTTPException(status_code=422, detail="invalid task status transition")
+        updates["updated_at"] = datetime.now(timezone.utc)
+        return _task_response(repository.update(object_id, updates))
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="database unavailable") from exc
+
+
+@app.post(
+    "/maintenance-tasks/{task_id}/reinspection",
+    response_model=MaintenanceTaskResponse,
+)
+def schedule_reinspection(
+    task_id: str, payload: ReinspectionCreate, request: Request
+) -> MaintenanceTaskResponse:
+    object_id = _record_object_id(task_id, "task")
+    try:
+        repository = MaintenanceTaskRepository(_connection(request).database)
+        if repository.get(object_id) is None:
+            raise HTTPException(status_code=404, detail="maintenance task not found")
+        return _task_response(
+            repository.update(
+                object_id,
+                {
+                    "reinspection_required": True,
+                    "reinspection_status": "scheduled",
+                    "reinspection_notes": payload.notes,
+                    "updated_at": datetime.now(timezone.utc),
+                },
+            )
+        )
     except DatabaseUnavailableError as exc:
         raise HTTPException(status_code=503, detail="database unavailable") from exc
 

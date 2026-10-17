@@ -81,6 +81,25 @@ class MongoConnection:
                     ("assessed_at", DESCENDING),
                 ]
             )
+            database["inspection_missions"].create_index(
+                [
+                    ("asset_id", ASCENDING),
+                    ("created_at", DESCENDING),
+                ]
+            )
+            database["maintenance_tasks"].create_index(
+                [
+                    ("asset_id", ASCENDING),
+                    ("updated_at", DESCENDING),
+                ]
+            )
+            database["maintenance_tasks"].create_index(
+                [
+                    ("mission_id", ASCENDING),
+                    ("finding_id", ASCENDING),
+                ],
+                unique=True,
+            )
 
         except PyMongoError as exc:
             raise DatabaseUnavailableError from exc

@@ -198,6 +198,17 @@ dd { margin: 0.2rem 0 0; color: #d4e5e6; overflow-wrap: anywhere; }
 .risk-section h4 { margin: 1rem 0 0.4rem; color: #78d4c3; font-size: 0.78rem; text-transform: uppercase; }
 .risk-section ul { display: grid; gap: 0.45rem; margin: 0; padding-left: 1.2rem; color: #a5c0c5; line-height: 1.45; }
 .risk-warnings { color: #ffd694 !important; }
+.maintenance-workflow { margin-top: 1.5rem; padding-top: 1.2rem; border-top: 1px solid #24505d; }
+.maintenance-workflow > p { margin-top: 0.5rem; }
+.mission-card { margin-top: 1rem; padding: 1rem; border: 1px solid #2d6972; border-radius: 0.8rem; background: #0b2631; }
+.mission-card h4, .maintenance-section h4 { margin: 0.8rem 0 0.4rem; color: #78d4c3; font-size: 0.78rem; text-transform: uppercase; }
+.checklist, .finding-list, .task-list { display: grid; gap: 0.55rem; margin: 0.7rem 0 0; padding-left: 1.2rem; color: #a5c0c5; line-height: 1.45; }
+.finding-list li, .task-list li { display: grid; gap: 0.25rem; }
+.finding-list span, .task-list span, .task-list small { color: #8eafb4; font-size: 0.8rem; }
+.text-button { width: fit-content; border: 0; padding: 0; background: transparent; color: #78d4c3; font-size: 0.8rem; font-weight: 700; }
+.mission-card select { width: 100%; border: 1px solid #2e5d68; border-radius: 0.65rem; background: #0b2631; color: #e8f1f2; padding: 0.75rem 0.85rem; }
+.finding-form { margin-top: 1rem; }
+.maintenance-section { margin-top: 1.5rem; padding-top: 1.2rem; border-top: 1px solid #24505d; }
 footer { padding: 0 0 2rem; color: #618991; font-size: 0.8rem; }
 footer span { padding: 0 0.4rem; color: #78d4c3; }
 

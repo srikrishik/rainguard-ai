@@ -78,6 +78,8 @@ class FakeDatabase:
             "incidents": FakeCollection(),
             "inspections": FakeCollection(),
             "risk_assessments": FakeCollection(),
+            "inspection_missions": FakeCollection(),
+            "maintenance_tasks": FakeCollection(),
         }
 
     def __getitem__(self, name):
@@ -671,3 +673,138 @@ def test_rule_baseline_remains_default_when_tabpfn_is_unavailable(monkeypatch):
     assert response.json()["method"] == "rule_based_asset_risk_baseline"
     assert response.json()["method_version"] == "phase-5a-v1"
     assert response.json()["requires_human_review"] is True
+
+
+def test_inspection_mission_finding_approval_and_task_lifecycle(monkeypatch):
+    database, asset_id = asset_database()
+    monkeypatch.setattr(main, "_connection", lambda request: FakeConnection(database))
+
+    with TestClient(main.app) as client:
+        mission_response = client.post(f"/assets/{asset_id}/inspection-missions")
+        mission = mission_response.json()
+        assert mission_response.status_code == 201
+        assert len(mission["checklist"]) == 6
+
+        finding_response = client.post(
+            f"/inspection-missions/{mission['id']}/findings",
+            json={
+                "checklist_item_id": "debris-obstruction",
+                "description": "Leaves obstruct the drain opening.",
+                "evidence_refs": ["inspection-photo-1"],
+            },
+        )
+        finding = finding_response.json()["findings"][0]
+        assert finding_response.status_code == 201
+        assert finding["approved"] is False
+
+        rejected = client.post(
+            "/maintenance-tasks",
+            json={
+                "asset_id": str(asset_id),
+                "mission_id": mission["id"],
+                "finding_id": finding["id"],
+                "description": finding["description"],
+                "priority": "high",
+            },
+        )
+        assert rejected.status_code == 409
+
+        approved_response = client.post(
+            f"/inspection-missions/{mission['id']}/findings/{finding['id']}/approve"
+        )
+        assert approved_response.status_code == 200
+        assert approved_response.json()["findings"][0]["approved"] is True
+
+        task_response = client.post(
+            "/maintenance-tasks",
+            json={
+                "asset_id": str(asset_id),
+                "mission_id": mission["id"],
+                "finding_id": finding["id"],
+                "description": finding["description"],
+                "priority": "high",
+                "assignee": "Maintenance team",
+                "evidence_refs": ["inspection-photo-1"],
+            },
+        )
+        task = task_response.json()
+        assert task_response.status_code == 201
+        assert task["status"] == "pending"
+
+        duplicate = client.post(
+            "/maintenance-tasks",
+            json={
+                "asset_id": str(asset_id),
+                "mission_id": mission["id"],
+                "finding_id": finding["id"],
+                "description": finding["description"],
+                "priority": "high",
+            },
+        )
+        assert duplicate.status_code == 201
+        assert duplicate.json()["id"] == task["id"]
+        assert len(database["maintenance_tasks"].documents) == 1
+
+        started = client.patch(
+            f"/maintenance-tasks/{task['id']}",
+            json={"status": "in_progress"},
+        )
+        completed = client.patch(
+            f"/maintenance-tasks/{task['id']}",
+            json={
+                "status": "completed",
+                "completion_notes": "Cleared leaves and flushed the opening.",
+                "evidence_refs": ["after-photo-reference"],
+            },
+        )
+        reinspection = client.post(
+            f"/maintenance-tasks/{task['id']}/reinspection",
+            json={"notes": "Verify flow after the next heavy rain."},
+        )
+        listed = client.get(f"/assets/{asset_id}/maintenance-tasks")
+        dashboard = client.get("/maintenance-tasks")
+
+    assert started.status_code == 200
+    assert completed.status_code == 200
+    assert completed.json()["completion_notes"] == "Cleared leaves and flushed the opening."
+    assert reinspection.status_code == 200
+    assert reinspection.json()["reinspection_status"] == "scheduled"
+    assert listed.status_code == 200 and len(listed.json()) == 1
+    assert dashboard.status_code == 200 and len(dashboard.json()) == 1
+
+
+def test_mission_and_task_validation_and_missing_ids(monkeypatch):
+    database, asset_id = asset_database()
+    monkeypatch.setattr(main, "_connection", lambda request: FakeConnection(database))
+
+    with TestClient(main.app) as client:
+        invalid_mission = client.get("/inspection-missions/not-an-id")
+        mission_response = client.post(f"/assets/{asset_id}/inspection-missions")
+        mission_id = mission_response.json()["id"]
+        invalid_finding = client.post(
+            f"/inspection-missions/{mission_id}/findings",
+            json={
+                "checklist_item_id": "unknown",
+                "description": "Invalid checklist item",
+            },
+        )
+        missing_task = client.get("/maintenance-tasks/not-an-id")
+        missing_asset_mission = client.post(
+            f"/assets/{ObjectId()}/inspection-missions"
+        )
+
+    assert invalid_mission.status_code == 400
+    assert invalid_finding.status_code == 422
+    assert missing_task.status_code == 400
+    assert missing_asset_mission.status_code == 404
+
+
+def test_task_database_failure_returns_safe_error(monkeypatch):
+    database, asset_id = asset_database()
+    database.collections["inspection_missions"] = FailingCollection()
+    monkeypatch.setattr(main, "_connection", lambda request: FakeConnection(database))
+
+    with TestClient(main.app) as client:
+        response = client.post(f"/assets/{asset_id}/inspection-missions")
+
+    assert response.status_code == 503
