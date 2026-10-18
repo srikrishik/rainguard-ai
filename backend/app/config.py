@@ -20,6 +20,13 @@ def _get_optional_env(name: str) -> str | None:
     return os.getenv(name, "").strip() or None
 
 
+def _get_bool_env(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class Settings:
     frontend_origin: str = "http://localhost:5173"
@@ -30,6 +37,11 @@ class Settings:
     gemma_api_key: str | None = None
     gemma_api_url: str | None = None
     gemma_model_id: str | None = None
+
+    # Optional Temporal integration; disabled until a server and worker exist.
+    temporal_address: str = "127.0.0.1:7233"
+    temporal_namespace: str = "default"
+    temporal_enabled: bool = False
 
 
 def get_settings() -> Settings:
@@ -43,4 +55,13 @@ def get_settings() -> Settings:
         gemma_api_key=_get_optional_env("GEMMA_API_KEY"),
         gemma_api_url=_get_optional_env("GEMMA_API_URL"),
         gemma_model_id=_get_optional_env("GEMMA_MODEL_ID"),
+        temporal_address=(
+            os.getenv("TEMPORAL_ADDRESS", "127.0.0.1:7233").strip()
+            or "127.0.0.1:7233"
+        ),
+        temporal_namespace=(
+            os.getenv("TEMPORAL_NAMESPACE", "default").strip()
+            or "default"
+        ),
+        temporal_enabled=_get_bool_env("TEMPORAL_ENABLED"),
     )

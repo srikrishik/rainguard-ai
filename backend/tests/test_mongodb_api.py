@@ -5,10 +5,12 @@ from types import SimpleNamespace
 from bson import ObjectId
 from fastapi.testclient import TestClient
 import pytest
+from pymongo.errors import DuplicateKeyError
 
 from app import main
 from app.database import MongoConnection
 from app.gemma_service import GemmaServiceError
+from app.repositories import MaintenanceTaskRepository
 from app.schemas import GemmaReport
 from app.risk_service import assess_asset_risk
 
@@ -68,6 +70,22 @@ class FailingCollection(FakeCollection):
         from pymongo.errors import PyMongoError
 
         raise PyMongoError("database unavailable")
+
+
+class DuplicateKeyAfterLookupCollection(FakeCollection):
+    def __init__(self, existing_document):
+        super().__init__()
+        self.documents.append(existing_document)
+        self.lookup_count = 0
+
+    def find_one(self, query):
+        self.lookup_count += 1
+        if self.lookup_count == 1:
+            return None
+        return super().find_one(query)
+
+    def insert_one(self, document):
+        raise DuplicateKeyError("duplicate key")
 
 
 class FakeDatabase:
@@ -944,6 +962,35 @@ def test_reinspection_response_normalizes_legacy_mongodb_timestamps(monkeypatch)
     assert naive.json()["status"] == "pending"
     assert invalid.status_code == 200
     assert invalid.json()["reinspection_due_at"] is None
+
+
+def test_maintenance_task_repository_reuses_task_after_duplicate_key():
+    mission_id = ObjectId()
+    finding_id = "finding-1"
+    existing = {
+        "_id": ObjectId(),
+        "mission_id": mission_id,
+        "finding_id": finding_id,
+        "status": "pending",
+    }
+    database = FakeDatabase()
+    database.collections["maintenance_tasks"] = DuplicateKeyAfterLookupCollection(
+        existing
+    )
+    repository = MaintenanceTaskRepository(database)
+
+    result = repository.create(
+        {
+            "_id": ObjectId(),
+            "mission_id": mission_id,
+            "finding_id": finding_id,
+            "status": "pending",
+        }
+    )
+
+    assert result == existing
+    assert result["_id"] == existing["_id"]
+    assert len(database["maintenance_tasks"].documents) == 1
 
 
 def test_task_database_failure_returns_safe_error(monkeypatch):

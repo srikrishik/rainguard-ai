@@ -172,3 +172,9 @@ class MaintenanceTaskResponse(BaseModel):
     reinspection_status: Literal["not_required", "scheduled", "completed"] = "not_required"
     reinspection_notes: str | None = None
     reinspection_due_at: datetime | None = None
+
+
+class MaintenanceTaskWorkflowStartResponse(BaseModel):
+    task_id: str
+    workflow_id: str
+    status: Literal["started", "already_started"]

@@ -9,6 +9,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi import HTTPException, Request, status
 from bson import ObjectId
 from bson.errors import InvalidId
+from temporalio.common import WorkflowIDReusePolicy
+from temporalio.exceptions import TemporalError, WorkflowAlreadyStartedError
 
 from app.config import get_settings
 from app.database import DatabaseUnavailableError, MongoConnection
@@ -27,6 +29,8 @@ from app.repositories import (
     RiskAssessmentRepository,
 )
 from app.risk_service import assess_asset_risk
+from app.temporal_client import create_temporal_client
+from app.temporal_worker import TASK_QUEUE
 from app.schemas import (
     AssetCreate,
     AssetResponse,
@@ -36,6 +40,7 @@ from app.schemas import (
     InspectionMissionResponse,
     MaintenanceTaskCreate,
     MaintenanceTaskResponse,
+    MaintenanceTaskWorkflowStartResponse,
     MaintenanceTaskUpdate,
     MissionFindingCreate,
     MissionUpdate,
@@ -327,6 +332,21 @@ def _record_object_id(value: str, label: str) -> ObjectId:
         raise HTTPException(status_code=400, detail=f"invalid {label} id") from exc
 
 
+def _maintenance_workflow_input(task: dict[str, Any]) -> dict[str, Any]:
+    due_date = task.get("due_date")
+    return {
+        "asset_id": str(task["asset_id"]),
+        "mission_id": str(task["mission_id"]),
+        "finding_id": task["finding_id"],
+        "description": task["description"],
+        "priority": task["priority"],
+        "assignee": task.get("assignee"),
+        "due_date": due_date.isoformat() if due_date is not None else None,
+        "completion_notes": task.get("completion_notes"),
+        "evidence_refs": task.get("evidence_refs", []),
+    }
+
+
 def _mission_checklist(asset: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         {"id": "opening-clear", "prompt": "Is the drain opening clear?", "completed": False},
@@ -578,6 +598,60 @@ def get_maintenance_task(task_id: str, request: Request) -> MaintenanceTaskRespo
         return _task_response(task)
     except DatabaseUnavailableError as exc:
         raise HTTPException(status_code=503, detail="database unavailable") from exc
+
+
+@app.post(
+    "/maintenance-tasks/{task_id}/temporal-workflow",
+    response_model=MaintenanceTaskWorkflowStartResponse,
+    status_code=202,
+)
+async def start_maintenance_task_workflow(
+    task_id: str, request: Request
+) -> MaintenanceTaskWorkflowStartResponse:
+    object_id = _record_object_id(task_id, "task")
+    try:
+        task = MaintenanceTaskRepository(_connection(request).database).get(object_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="maintenance task not found")
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="database unavailable") from exc
+
+    if not settings.temporal_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Temporal workflow service is disabled",
+        )
+
+    workflow_id = f"maintenance-task-{task_id}"
+    try:
+        client = await create_temporal_client(settings)
+        if client is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Temporal workflow service is disabled",
+            )
+        await client.start_workflow(
+            "maintenance-task-orchestration",
+            _maintenance_workflow_input(task),
+            id=workflow_id,
+            task_queue=TASK_QUEUE,
+            id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+        )
+        start_status = "started"
+    except WorkflowAlreadyStartedError:
+        start_status = "already_started"
+    except (TemporalError, OSError, TimeoutError) as exc:
+        logger.warning("Unable to start maintenance workflow", exc_info=exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Temporal workflow service unavailable",
+        ) from exc
+
+    return MaintenanceTaskWorkflowStartResponse(
+        task_id=task_id,
+        workflow_id=workflow_id,
+        status=start_status,
+    )
 
 
 @app.patch("/maintenance-tasks/{task_id}", response_model=MaintenanceTaskResponse)

@@ -4,7 +4,7 @@ from typing import Any
 
 from bson import ObjectId
 from pymongo.database import Database
-from pymongo.errors import PyMongoError
+from pymongo.errors import DuplicateKeyError, PyMongoError
 
 from app.database import DatabaseUnavailableError
 
@@ -181,14 +181,26 @@ class MaintenanceTaskRepository:
         self.collection = database["maintenance_tasks"]
 
     def create(self, document: dict[str, Any]) -> dict[str, Any]:
+        key = {
+            "mission_id": document["mission_id"],
+            "finding_id": document["finding_id"],
+        }
         try:
-            duplicate = self.collection.find_one(
-                {"mission_id": document["mission_id"], "finding_id": document["finding_id"]}
-            )
+            duplicate = self.collection.find_one(key)
             if duplicate is not None:
                 return duplicate
             result = self.collection.insert_one(document)
             return self.collection.find_one({"_id": result.inserted_id}) or document
+        except DuplicateKeyError:
+            try:
+                duplicate = self.collection.find_one(key)
+            except PyMongoError as exc:
+                raise DatabaseUnavailableError from exc
+            if duplicate is not None:
+                return duplicate
+            raise DatabaseUnavailableError(
+                "maintenance task duplicate could not be retrieved"
+            )
         except PyMongoError as exc:
             raise DatabaseUnavailableError from exc
 
